@@ -49,6 +49,21 @@ public final class MediaPipeFaceMeshBackend implements LivenessBackend {
 
     private static final int DEFAULT_INPUT_SIZE = 192;
     private static final int NUM_LANDMARKS = 468;
+    private static final int NUM_LANDMARKS_WITH_IRIS = 478;
+
+    // Iris landmark indices (478-point model only)
+    // Left iris: center=468, top=469, right=470, bottom=471, left=472
+    private static final int LEFT_IRIS_CENTER  = 468;
+    private static final int LEFT_IRIS_TOP     = 469;
+    private static final int LEFT_IRIS_RIGHT   = 470;
+    private static final int LEFT_IRIS_BOTTOM  = 471;
+    private static final int LEFT_IRIS_LEFT    = 472;
+    // Right iris: center=473, top=474, right=475, bottom=476, left=477
+    private static final int RIGHT_IRIS_CENTER = 473;
+    private static final int RIGHT_IRIS_TOP    = 474;
+    private static final int RIGHT_IRIS_RIGHT  = 475;
+    private static final int RIGHT_IRIS_BOTTOM = 476;
+    private static final int RIGHT_IRIS_LEFT   = 477;
 
     // MediaPipe FaceMesh landmark indices (468-point model)
     // Left eye contour (6 points for EAR)
@@ -89,7 +104,9 @@ public final class MediaPipeFaceMeshBackend implements LivenessBackend {
     private Object interpreter;
     private Method runMethod;
     private int modelInputSize = DEFAULT_INPUT_SIZE;
-    private float[][][] meshOutput;   // [1][NUM_LANDMARKS][5] or [1][1404]
+    private int numLandmarks = NUM_LANDMARKS;
+    private boolean useIris;
+    private float[][][] meshOutput;   // [1][numLandmarks][5]
 
     // Face detection via OpenCV (reused from TfLiteMiniFasNetBackend pattern)
     private Object faceClassifier;
@@ -145,8 +162,8 @@ public final class MediaPipeFaceMeshBackend implements LivenessBackend {
             modelInputSize = Integer.parseInt(options.get(OPTION_MODEL_INPUT_SIZE));
         }
 
-        boolean useIris = Boolean.parseBoolean(options.getOrDefault(OPTION_USE_IRIS_MESH, "false"));
-        int landmarks = useIris ? 478 : NUM_LANDMARKS;
+        useIris = Boolean.parseBoolean(options.getOrDefault(OPTION_USE_IRIS_MESH, "false"));
+        numLandmarks = useIris ? NUM_LANDMARKS_WITH_IRIS : NUM_LANDMARKS;
 
         try {
             Class<?> interpCls = Class.forName("org.tensorflow.lite.Interpreter");
@@ -159,8 +176,8 @@ public final class MediaPipeFaceMeshBackend implements LivenessBackend {
                     .newInstance(new java.io.File(modelPath), opts);
             runMethod = interpCls.getMethod("run", Object.class, Object.class);
 
-            // Allocate output: [1][landmarks][5] or [1][landmarks*5] depending on model
-            meshOutput = new float[1][landmarks][5];
+            // Allocate output: [1][landmarks][5] depending on model
+            meshOutput = new float[1][numLandmarks][5];
             meshReady = true;
         } catch (LivenessException e) { throw e; }
         catch (Exception e) {
@@ -333,8 +350,8 @@ public final class MediaPipeFaceMeshBackend implements LivenessBackend {
         // Resize to model input size (nearest-neighbor via byte copy)
         float[][][][] input = preprocessRoi(roi, cropW, cropH);
 
-        // Run FaceMesh inference — output is [1][468][5]
-        float[][][] output = new float[1][NUM_LANDMARKS][5];
+        // Run FaceMesh inference — output is [1][numLandmarks][5]
+        float[][][] output = new float[1][numLandmarks][5];
         try {
             runMethod.invoke(interpreter, input, output);
         } catch (Exception e) {
@@ -346,7 +363,7 @@ public final class MediaPipeFaceMeshBackend implements LivenessBackend {
         // Scale landmarks back to frame coordinates
         float scaleX = (float) cropW / modelInputSize;
         float scaleY = (float) cropH / modelInputSize;
-        for (int i = 0; i < NUM_LANDMARKS; i++) {
+        for (int i = 0; i < numLandmarks; i++) {
             output[0][i][0] = output[0][i][0] * scaleX + cropX;  // x in frame coords
             output[0][i][1] = output[0][i][1] * scaleY + cropY;  // y in frame coords
         }
@@ -507,56 +524,121 @@ public final class MediaPipeFaceMeshBackend implements LivenessBackend {
     }
 
     /**
-     * Estimate gaze direction from iris position relative to eye contour.
-     * Uses the eye-contour center vs. the geometric center of the eye landmarks.
+     * Estimate gaze direction. When the 478-point iris model is active,
+     * uses actual iris center position relative to eye contour boundaries.
+     * Falls back to geometric approximation from eye-contour landmarks.
      * Returns normalized [gazeX, gazeY] in [-1, 1].
      */
     private double[] computeGaze(float[][][] lm) {
-        // Left eye gaze: center of eye contour vs. face center
-        double leftGazeX = eyeGazeComponent(lm, LEFT_EYE);
-        double leftGazeY = eyeGazeYComponent(lm, LEFT_EYE);
+        if (useIris && numLandmarks >= NUM_LANDMARKS_WITH_IRIS) {
+            return irisGaze(lm);
+        }
+        return geometricGaze(lm);
+    }
 
-        // Right eye gaze
-        double rightGazeX = eyeGazeComponent(lm, RIGHT_EYE);
-        double rightGazeY = eyeGazeYComponent(lm, RIGHT_EYE);
+    /**
+     * Precise gaze from iris center landmarks (478-point model).
+     * 
+     * The iris center position relative to the eye's bounding box tells us
+     * where the person is looking:
+     * - Iris centered in eye → looking straight ahead (gaze ≈ 0)
+     * - Iris shifted left in eye → looking left (gazeX < 0)
+     * - Iris shifted right in eye → looking right (gazeX > 0)
+     * - Iris shifted up in eye → looking up (gazeY < 0)
+     * - Iris shifted down in eye → looking down (gazeY > 0)
+     */
+    private double[] irisGaze(float[][][] lm) {
+        // Left iris gaze
+        float[] leftIrisCenter  = lm[0][LEFT_IRIS_CENTER];
+        float[] leftIrisTop     = lm[0][LEFT_IRIS_TOP];
+        float[] leftIrisBottom  = lm[0][LEFT_IRIS_BOTTOM];
+        float[] leftIrisLeft    = lm[0][LEFT_IRIS_LEFT];
+        float[] leftIrisRight   = lm[0][LEFT_IRIS_RIGHT];
 
-        // Average both eyes
+        // Left eye boundary from contour landmarks
+        float[] leftOuter = lm[0][LEFT_EYE[0]];  // outer corner
+        float[] leftInner = lm[0][LEFT_EYE[3]];  // inner corner
+        float[] leftUpper = lm[0][LEFT_EYE[1]];  // upper lid
+        float[] leftLower = lm[0][LEFT_EYE[4]];  // lower lid
+
+        double leftGazeX = irisOffsetX(leftIrisCenter, leftOuter, leftInner);
+        double leftGazeY = irisOffsetY(leftIrisCenter, leftUpper, leftLower);
+
+        // Right iris gaze
+        float[] rightIrisCenter = lm[0][RIGHT_IRIS_CENTER];
+        float[] rightOuter = lm[0][RIGHT_EYE[0]];
+        float[] rightInner = lm[0][RIGHT_EYE[3]];
+        float[] rightUpper = lm[0][RIGHT_EYE[1]];
+        float[] rightLower = lm[0][RIGHT_EYE[4]];
+
+        double rightGazeX = irisOffsetX(rightIrisCenter, rightOuter, rightInner);
+        double rightGazeY = irisOffsetY(rightIrisCenter, rightUpper, rightLower);
+
+        // Average both eyes for final gaze
         double gazeX = clamp(-1.0, 1.0, (leftGazeX + rightGazeX) / 2.0);
         double gazeY = clamp(-1.0, 1.0, (leftGazeY + rightGazeY) / 2.0);
 
         return new double[]{gazeX, gazeY};
     }
 
-    /** Horizontal gaze component from eye landmark geometry. */
-    private double eyeGazeComponent(float[][][] lm, int[] eyeIndices) {
-        // Outer and inner corners of the eye
-        float[] outer = lm[0][eyeIndices[0]]; // outer corner
-        float[] inner = lm[0][eyeIndices[3]]; // inner corner
+    /**
+     * Horizontal iris offset: iris center position relative to eye corners.
+     * Returns [-1, 1] where -1 = looking toward outer corner, +1 = toward inner.
+     */
+    private double irisOffsetX(float[] irisCenter, float[] outerCorner, float[] innerCorner) {
+        double eyeW = Math.abs(innerCorner[0] - outerCorner[0]);
+        if (eyeW < 1e-6) return 0.0;
+        double eyeCx = (outerCorner[0] + innerCorner[0]) / 2.0;
+        // Positive offset = iris toward inner corner (nasal side)
+        double offset = irisCenter[0] - eyeCx;
+        return clamp(-1.0, 1.0, offset / (eyeW * 0.5));
+    }
 
-        // Upper and lower lid centers
+    /**
+     * Vertical iris offset: iris center position relative to upper/lower lids.
+     * Returns [-1, 1] where -1 = looking up, +1 = looking down.
+     */
+    private double irisOffsetY(float[] irisCenter, float[] upperLid, float[] lowerLid) {
+        double eyeH = Math.abs(lowerLid[1] - upperLid[1]);
+        if (eyeH < 1e-6) return 0.0;
+        double eyeCy = (upperLid[1] + lowerLid[1]) / 2.0;
+        double offset = irisCenter[1] - eyeCy;
+        return clamp(-1.0, 1.0, offset / (eyeH * 0.5));
+    }
+
+    /**
+     * Fallback gaze estimation from eye-contour geometry (no iris landmarks).
+     * Uses upper/lower lid midpoint relative to eye center as pupil proxy.
+     */
+    private double[] geometricGaze(float[][][] lm) {
+        double leftGazeX = eyeGazeComponent(lm, LEFT_EYE);
+        double leftGazeY = eyeGazeYComponent(lm, LEFT_EYE);
+        double rightGazeX = eyeGazeComponent(lm, RIGHT_EYE);
+        double rightGazeY = eyeGazeYComponent(lm, RIGHT_EYE);
+
+        double gazeX = clamp(-1.0, 1.0, (leftGazeX + rightGazeX) / 2.0);
+        double gazeY = clamp(-1.0, 1.0, (leftGazeY + rightGazeY) / 2.0);
+        return new double[]{gazeX, gazeY};
+    }
+
+    private double eyeGazeComponent(float[][][] lm, int[] eyeIndices) {
+        float[] outer = lm[0][eyeIndices[0]];
+        float[] inner = lm[0][eyeIndices[3]];
         float[] upper = lm[0][eyeIndices[1]];
         float[] lower = lm[0][eyeIndices[4]];
-
-        // Eye center
         double eyeCx = (outer[0] + inner[0]) / 2.0;
         double eyeW = Math.abs(inner[0] - outer[0]);
         if (eyeW < 1e-6) return 0.0;
-
-        // Gaze offset: how far the visual center is from the eye center
-        // (This is a geometric approximation; iris detection would be more accurate)
         double pupilOffset = (upper[0] + lower[0]) / 2.0 - eyeCx;
         return clamp(-1.0, 1.0, pupilOffset / (eyeW * 0.5));
     }
 
-    /** Vertical gaze component. */
     private double eyeGazeYComponent(float[][][] lm, int[] eyeIndices) {
         float[] upper = lm[0][eyeIndices[1]];
         float[] lower = lm[0][eyeIndices[4]];
         double eyeH = Math.abs(lower[1] - upper[1]);
         if (eyeH < 1e-6) return 0.0;
-
         double eyeCy = (upper[1] + lower[1]) / 2.0;
-        // Use the midpoint of upper/lower as proxy for gaze vertical
         double pupilVert = (upper[1] + lower[1]) / 2.0 - eyeCy;
         return clamp(-1.0, 1.0, pupilVert / (eyeH * 0.5));
     }
@@ -568,7 +650,7 @@ public final class MediaPipeFaceMeshBackend implements LivenessBackend {
         // Landmark spread: a well-detected face has landmarks spread across the face
         float minX = Float.MAX_VALUE, maxX = -Float.MAX_VALUE;
         float minY = Float.MAX_VALUE, maxY = -Float.MAX_VALUE;
-        for (int i = 0; i < NUM_LANDMARKS; i++) {
+        for (int i = 0; i < numLandmarks; i++) {
             float x = lm[0][i][0], y = lm[0][i][1];
             if (x < minX) minX = x;
             if (x > maxX) maxX = x;
