@@ -46,6 +46,8 @@ public final class MediaPipeFaceMeshBackend implements LivenessBackend {
     public static final String OPTION_EYE_CASCADE_PATH = "eyeCascadePath";
     public static final String OPTION_MODEL_INPUT_SIZE = "modelInputSize";
     public static final String OPTION_USE_IRIS_MESH = "useIrisMesh";
+    public static final String OPTION_BUFFER_SIZE = "temporalBufferSize";
+    public static final String OPTION_MIN_BUFFER_FRAMES = "temporalMinFrames";
 
     private static final int DEFAULT_INPUT_SIZE = 192;
     private static final int NUM_LANDMARKS = 468;
@@ -108,6 +110,13 @@ public final class MediaPipeFaceMeshBackend implements LivenessBackend {
     private boolean useIris;
     private float[][][] meshOutput;   // [1][numLandmarks][5]
 
+    // Temporal liveness buffer
+    private static final int DEFAULT_BUFFER_SIZE = 15;
+    private static final int DEFAULT_MIN_BUFFER_FRAMES = 8;
+    private int bufferSize = DEFAULT_BUFFER_SIZE;
+    private int minBufferFrames = DEFAULT_MIN_BUFFER_FRAMES;
+    private final TemporalBuffer temporalBuffer = new TemporalBuffer();
+
     // Face detection via OpenCV (reused from TfLiteMiniFasNetBackend pattern)
     private Object faceClassifier;
     private Object eyeClassifier;
@@ -164,6 +173,12 @@ public final class MediaPipeFaceMeshBackend implements LivenessBackend {
 
         useIris = Boolean.parseBoolean(options.getOrDefault(OPTION_USE_IRIS_MESH, "false"));
         numLandmarks = useIris ? NUM_LANDMARKS_WITH_IRIS : NUM_LANDMARKS;
+        if (options.containsKey(OPTION_BUFFER_SIZE)) {
+            bufferSize = Integer.parseInt(options.get(OPTION_BUFFER_SIZE));
+        }
+        if (options.containsKey(OPTION_MIN_BUFFER_FRAMES)) {
+            minBufferFrames = Integer.parseInt(options.get(OPTION_MIN_BUFFER_FRAMES));
+        }
 
         try {
             Class<?> interpCls = Class.forName("org.tensorflow.lite.Interpreter");
@@ -678,36 +693,91 @@ public final class MediaPipeFaceMeshBackend implements LivenessBackend {
     }
 
     // ===================================================================
-    // Passive liveness scoring — delegated to FaceMesh temporal analysis
+    // Passive liveness scoring — temporal analysis from frame buffer
     // ===================================================================
 
     /**
-     * Passive liveness score using FaceMesh-derived signals.
-     * A live face should show micro-movements (blink, slight pose changes),
-     * while a static photo/screen replay shows no temporal variation.
+     * Passive liveness score using temporal analysis across recent frames.
      *
-     * <p>This is a placeholder — a production system should maintain a
-     * rolling buffer of FaceSignals across frames and compute temporal
-     * variance metrics. For now, returns a confidence based on landmark
-     * quality and face presence.</p>
+     * <p>A live face exhibits characteristic temporal patterns:</p>
+     * <ul>
+     *   <li><b>EAR variance</b>: blinks cause EAR to dip and recover —
+     *       live faces show high EAR variance, photos/screens are constant</li>
+     *   <li><b>Blink detection</b>: EAR crossing below a close threshold
+     *       and then recovering — impossible for a static photo</li>
+     *   <li><b>Pose micro-movements</b>: natural head sway causes yaw/pitch
+     *       to fluctuate — photos are perfectly rigid</li>
+     *   <li><b>Smile variation</b>: subtle smile changes over time —
+     *       printed photos have constant mouth shape</li>
+     * </ul>
+     *
+     * <p>Each metric contributes a weighted component to the final score.</p>
      */
     @Override
     public double scorePassiveLiveness(Frame frame, FaceSignals signals) {
-        // Base score from face quality
-        double base = signals.qualityScore();
-
-        // Landmark-based bonus: if we have precise EAR landmarks, the
-        // detection is more reliable (not a photo on a screen)
-        if (signals.hasLandmarks()) {
-            base = Math.min(1.0, base + 0.1);
+        if (!signals.hasLandmarks()) {
+            // No landmarks available — can't do temporal analysis
+            return clamp01(signals.qualityScore());
         }
 
-        // TODO: In production, maintain a frame buffer and compute:
-        // - EAR temporal variance (live: varies, photo: constant)
-        // - Head pose micro-movements (live: small jitters, photo: static)
-        // - Blink detection (live: occasional blinks, photo: never)
+        // Push current signals into the temporal buffer
+        temporalBuffer.push(signals);
 
-        return clamp01(base);
+        // Not enough frames yet — return quality-based estimate
+        if (temporalBuffer.size() < minBufferFrames) {
+            return clamp01(signals.qualityScore() + 0.05 * temporalBuffer.size() / minBufferFrames);
+        }
+
+        // Compute temporal metrics
+        double earVar       = temporalBuffer.earVariance();
+        int blinks          = temporalBuffer.blinkCount();
+        double poseVar      = temporalBuffer.poseVariance();
+        double smileVar     = temporalBuffer.smileVariance();
+        double gazeVar      = temporalBuffer.gazeVariance();
+
+        // ---- EAR variance score ----
+        // Live: EAR varies between 0.25-0.35 normally, dips to 0.05-0.10 on blink
+        // Photo: EAR is constant (variance ≈ 0)
+        // Threshold: variance > 0.001 suggests real eye movement
+        double earScore = clamp01(earVar < 0.0005 ? earVar / 0.0005 * 0.3 :
+                earVar < 0.002 ? 0.3 + (earVar - 0.0005) / 0.0015 * 0.5 : 0.8);
+
+        // ---- Blink score ----
+        // Even one blink is strong evidence of liveness
+        // A static photo never blinks
+        double blinkScore = blinks == 0 ? 0.0 : clamp01(0.5 + blinks * 0.15);
+
+        // ---- Pose micro-movement score ----
+        // Live: yaw/pitch vary by 0.5-3° due to natural sway
+        // Photo: yaw/pitch are constant (variance ≈ 0)
+        double poseScore = clamp01(poseVar < 0.01 ? poseVar / 0.01 * 0.2 :
+                poseVar < 0.1 ? 0.2 + (poseVar - 0.01) / 0.09 * 0.5 : 0.7);
+
+        // ---- Smile variation score ----
+        // Live: subtle smile changes (variance > 0)
+        // Photo: constant mouth shape
+        double smileScore = clamp01(smileVar < 0.001 ? smileVar / 0.001 * 0.3 :
+                smileVar < 0.005 ? 0.3 + (smileVar - 0.001) / 0.004 * 0.4 : 0.7);
+
+        // ---- Gaze variation score ----
+        // Live: eyes shift slightly (variance > 0)
+        // Photo: gaze is fixed
+        double gazeScore = clamp01(gazeVar < 0.002 ? gazeVar / 0.002 * 0.3 :
+                gazeVar < 0.01 ? 0.3 + (gazeVar - 0.002) / 0.008 * 0.4 : 0.7);
+
+        // ---- Weighted combination ----
+        // EAR and blinks are the strongest liveness signals
+        double temporalScore = 0.30 * earScore
+                             + 0.25 * blinkScore
+                             + 0.20 * poseScore
+                             + 0.15 * smileScore
+                             + 0.10 * gazeScore;
+
+        // Blend with per-frame quality (spatial confidence)
+        double spatialScore = clamp01(signals.qualityScore());
+        double finalScore = 0.4 * temporalScore + 0.6 * spatialScore;
+
+        return clamp01(finalScore);
     }
 
     @Override
@@ -718,6 +788,91 @@ public final class MediaPipeFaceMeshBackend implements LivenessBackend {
             return PadVerdict.attack(PadAttackType.SCREEN_REPLAY, 1.0 - score);
         }
         return PadVerdict.bonaFide(score);
+    }
+
+    // ===================================================================
+    // Temporal buffer — rolling window of FaceSignals for liveness scoring
+    // ===================================================================
+
+    /**
+     * Fixed-size rolling buffer of recent FaceSignals.
+     * Computes temporal statistics: variance, blink count, movement metrics.
+     */
+    private class TemporalBuffer {
+        private final double[] earLeft  = new double[bufferSize];
+        private final double[] earRight = new double[bufferSize];
+        private final double[] yaw      = new double[bufferSize];
+        private final double[] pitch    = new double[bufferSize];
+        private final double[] smile    = new double[bufferSize];
+        private final double[] gazeX    = new double[bufferSize];
+        private final double[] gazeY    = new double[bufferSize];
+        private int count;
+        private int writeIdx;
+
+        void push(FaceSignals s) {
+            earLeft[writeIdx]  = s.minEyeAspectRatio().orElse(0.30);
+            earRight[writeIdx] = s.minEyeAspectRatio().orElse(0.30);
+            yaw[writeIdx]      = s.yawDegrees().orElse(0.0);
+            pitch[writeIdx]    = s.pitchDegrees().orElse(0.0);
+            smile[writeIdx]    = s.smileScore().orElse(0.05);
+            gazeX[writeIdx]    = s.gazeX().orElse(0.0);
+            gazeY[writeIdx]    = s.gazeY().orElse(0.0);
+            writeIdx = (writeIdx + 1) % bufferSize;
+            count = Math.min(count + 1, bufferSize);
+        }
+
+        int size() { return count; }
+
+        /** Variance of EAR across the buffer window. */
+        double earVariance() {
+            return variance(earLeft, count);
+        }
+
+        /** Count of blink events: EAR dipping below close threshold then recovering. */
+        int blinkCount() {
+            int blinks = 0;
+            boolean eyesClosed = false;
+            int readStart = (writeIdx - count + bufferSize) % bufferSize;
+            for (int i = 0; i < count; i++) {
+                int idx = (readStart + i) % bufferSize;
+                double ear = earLeft[idx];
+                if (!eyesClosed && ear < 0.12) {
+                    eyesClosed = true;
+                } else if (eyesClosed && ear > 0.22) {
+                    blinks++;
+                    eyesClosed = false;
+                }
+            }
+            return blinks;
+        }
+
+        /** Combined yaw+pitch variance (head movement). */
+        double poseVariance() {
+            return variance(yaw, count) + variance(pitch, count);
+        }
+
+        /** Smile score variance across the window. */
+        double smileVariance() {
+            return variance(smile, count);
+        }
+
+        /** Gaze direction variance (horizontal + vertical). */
+        double gazeVariance() {
+            return variance(gazeX, count) + variance(gazeY, count);
+        }
+
+        private double variance(double[] arr, int n) {
+            if (n < 2) return 0.0;
+            int start = (writeIdx - n + bufferSize) % bufferSize;
+            double sum = 0, sumSq = 0;
+            for (int i = 0; i < n; i++) {
+                double v = arr[(start + i) % bufferSize];
+                sum += v;
+                sumSq += v * v;
+            }
+            double mean = sum / n;
+            return sumSq / n - mean * mean;
+        }
     }
 
     @Override
