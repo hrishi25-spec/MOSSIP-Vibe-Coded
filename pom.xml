@@ -30,6 +30,12 @@
       io.mosip.liveness.backend.TfLiteMiniFasNetBackend. The core engine has no
       compile-time dependency on it.
     -->
+    <dependency>
+      <groupId>org.openpnp</groupId>
+      <artifactId>opencv</artifactId>
+      <version>4.9.0-0</version>
+      <scope>provided</scope>
+    </dependency>
   </dependencies>
 
   <build>
