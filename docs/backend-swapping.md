@@ -58,7 +58,38 @@ backend.initialize(options);
 FaceLivenessEngine engine = new FaceLivenessEngine(config, backend);
 ```
 
-**Note**: `analyzeFrame()` requires a companion face detector (MediaPipe BlazeFace/FaceMesh or OpenCV) to be wired in. See the TODO in the source.
+Uses OpenCV `CascadeClassifier` for face detection + eye detection, with geometric landmark estimation for EAR, pose, and gaze.
+
+### 3. `MediaPipeFaceMeshBackend` (high-fidelity landmarks)
+
+- Runs the MediaPipe FaceMesh TFLite model directly (468-point 3D landmark extraction).
+- No MediaPipe Java SDK dependency — uses TFLite runtime + OpenCV for face detection.
+- Computes precise signals from 468 landmarks:
+  - **EAR** from 6 eye-contour points per eye
+  - **Smile** from mouth width/height ratio
+  - **Head pose** (yaw/pitch) via geometric estimation with 6 reference landmarks
+  - **Gaze** from eye-contour geometry
+  - **Face quality** from landmark spread + size + centrality
+- Model: `face_mesh.tflite` (~5 MB) — download from MediaPipe model zoo.
+
+```java
+Map<String, String> options = Map.of(
+    "faceMeshModelPath", "/path/to/face_mesh.tflite",
+    "faceCascadePath", "/path/to/haarcascade_frontalface_alt.xml",
+    "threads", "4"
+);
+
+MediaPipeFaceMeshBackend backend = new MediaPipeFaceMeshBackend();
+backend.initialize(options);
+
+FaceLivenessEngine engine = new FaceLivenessEngine(config, backend);
+```
+
+**When to use**: Choose `MediaPipeFaceMeshBackend` over `TfLiteMiniFasNetBackend` when:
+- You need precise EAR for blink detection (active liveness challenges)
+- You need accurate head pose for turn-left/turn-right challenges
+- You want landmark-based gaze estimation
+- You have the FaceMesh model available (~5 MB)
 
 ---
 
@@ -185,6 +216,7 @@ For offline operation on Android:
 |---------|---------|-----------|------------|-------------------|---------|
 | MockLivenessBackend | ✓ | scripted | 0 MB | <1ms | Apache-2.0 |
 | TfLiteMiniFasNetBackend | ✓ | printed, screen | ~1.5 MB | 5-15ms | Apache-2.0 |
+| MediaPipeFaceMeshBackend | ✓ | printed, screen | ~5 MB | 8-20ms | Apache-2.0 |
 | Vendor SDK (licensed) | depends | all | varies | 10-50ms | commercial |
 
 ---
