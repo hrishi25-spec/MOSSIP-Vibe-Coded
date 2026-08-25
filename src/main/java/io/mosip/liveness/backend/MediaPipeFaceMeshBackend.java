@@ -124,12 +124,15 @@ public final class MediaPipeFaceMeshBackend implements LivenessBackend {
     private boolean meshReady;
 
     // Reflection handles for OpenCV
-    private Class<?> matCls, rectCls, sizeCls, cascadeCls, matOfRectCls;
-    private Constructor<?> rectCtor, sizeCtor;
+    private Class<?> matCls, rectCls, sizeCls, cascadeCls, matOfRectCls, matOfDoubleCls;
+    private Class<?> calib3dCls;
+    private Constructor<?> rectCtor, sizeCtor, matCtor3i, matCtor4i, matOfDoubleCtor;
     private Method mCreate, mRelease, mRows, mCols, mGet, mPut, mSubmat;
+    private Method mGetD;
     private Method cDetect, cLoad, cSetMinSize;
     private Method rX, rY, rW, rH;
     private Method morToArray;
+    private Method solvePnPMethod, rodriguesMethod, mEye;  // solvePnP + Rodrigues
 
     @Override public String id() { return "mediapipe-facemesh"; }
 
@@ -230,6 +233,18 @@ public final class MediaPipeFaceMeshBackend implements LivenessBackend {
             rX = rectCls.getMethod("x");  rY = rectCls.getMethod("y");
             rW = rectCls.getMethod("width"); rH = rectCls.getMethod("height");
             morToArray = matOfRectCls.getMethod("toArray");
+
+            // solvePnP + Rodrigues reflection
+            matOfDoubleCls = Class.forName("org.opencv.core.MatOfDouble");
+            calib3dCls = Class.forName("org.opencv.calib3d.Calib3d");
+            matCtor3i = matCls.getConstructor(int.class, int.class, int.class);            // CV_64FC1
+            matCtor4i = matCls.getConstructor(int.class, int.class, int.class, double.class);
+            matOfDoubleCtor = matOfDoubleCls.getConstructor(double[].class);
+            mGetD = matCls.getMethod("get", int.class, int.class, double[].class);
+            mEye = matCls.getMethod("eye", int.class, int.class, int.class);
+            solvePnPMethod = calib3dCls.getMethod("solvePnP",
+                    matCls, matCls, matCls, matCls, matCls, matCls, boolean.class);
+            rodriguesMethod = calib3dCls.getMethod("Rodrigues", matCls, matCls);
 
             // Load face cascade
             String facePath = options.get(OPTION_FACE_CASCADE_PATH);
@@ -481,55 +496,190 @@ public final class MediaPipeFaceMeshBackend implements LivenessBackend {
     }
 
     /**
-     * Estimate head pose (yaw, pitch) using solvePnP with 6 reference landmarks.
-     * Returns [yawDegrees, pitchDegrees].
+     * Estimate head pose (yaw, pitch, roll) using OpenCV solvePnP with 6
+     * facial reference landmarks and known 3D model points.
+     *
+     * <p>Algorithm:</p>
+     * <ol>
+     *   <li>Map 6 MediaPipe landmarks to 3D model coordinates (mm)</li>
+     *   <li>Extract corresponding 2D image coordinates from landmarks</li>
+     *   <li>Call OpenCV solvePnP to get rotation vector (rvec) + translation vector (tvec)</li>
+     *   <li>Convert rvec → Euler angles via Rodrigues decomposition</li>
+     * </ol>
+     *
+     * <p>Falls back to geometric estimation when OpenCV solvePnP is unavailable.</p>
+     *
+     * @return [yawDegrees, pitchDegrees, rollDegrees]
      */
     private double[] computePose(float[][][] lm, int frameCols, int frameRows) {
+        if (!opencvReady || solvePnPMethod == null) {
+            double[] geo = geometricPose(lm, frameCols, frameRows);
+            return new double[]{geo[0], geo[1], 0.0}; // no roll from geometry
+        }
         try {
-            // Get 2D image points from landmarks
-            int[] indices = {NOSE_TIP, CHIN, LEFT_EYE_OUTER, RIGHT_EYE_OUTER, LEFT_TEMPLE, RIGHT_TEMPLE};
-            double[][] imagePoints = new double[6][2];
-            for (int i = 0; i < 6; i++) {
-                imagePoints[i][0] = lm[0][indices[i]][0];
-                imagePoints[i][1] = lm[0][indices[i]][1];
-            }
-
-            // Camera intrinsics (approximate for typical webcam)
-            double cx = frameCols / 2.0;
-            double cy = frameRows / 2.0;
-            double focalLength = frameCols;  // rough approximation
-
-            double[][] cameraMatrix = {
-                    {focalLength, 0, cx},
-                    {0, focalLength, cy},
-                    {0, 0, 1}
-            };
-            double[] distCoeffs = {0, 0, 0, 0, 0};
-
-            // Solve PnP via OpenCV (if available) or fallback to geometric estimate
-            // For now, use a geometric fallback that's fast and reasonably accurate
-            return geometricPose(lm, frameCols, frameRows);
-
+            return solvePnpPose(lm, frameCols, frameRows);
         } catch (Exception e) {
-            return geometricPose(lm, frameCols, frameRows);
+            double[] geo = geometricPose(lm, frameCols, frameRows);
+            return new double[]{geo[0], geo[1], 0.0};
         }
     }
 
-    /** Geometric pose estimation from landmark positions. */
+    /**
+     * Solve head pose via OpenCV solvePnP.
+     * Returns [yaw, pitch, roll] in degrees.
+     */
+    private double[] solvePnpPose(float[][][] lm, int frameCols, int frameRows) throws Exception {
+        // ---- 3D model points (mm) ----
+        // Nose tip as origin, +Y up, +X right, +Z toward camera
+        double[] modelPts = {
+                0.0,      0.0,      0.0,       // 0: Nose tip
+                0.0,     -63.6,    -12.5,      // 1: Chin
+               -43.3,     32.7,    -26.0,      // 2: Left eye outer
+                43.3,     32.7,    -26.0,      // 3: Right eye outer
+               -80.0,    -20.0,    -15.0,      // 4: Left temple
+                80.0,    -20.0,    -15.0       // 5: Right temple
+        };
+
+        // ---- 2D image points from landmarks ----
+        int[] idx = {NOSE_TIP, CHIN, LEFT_EYE_OUTER, RIGHT_EYE_OUTER, LEFT_TEMPLE, RIGHT_TEMPLE};
+        double[] imagePts = new double[12]; // 6 points × 2 coords
+        for (int i = 0; i < 6; i++) {
+            imagePts[i * 2]     = lm[0][idx[i]][0];
+            imagePts[i * 2 + 1] = lm[0][idx[i]][1];
+        }
+
+        // ---- Build OpenCV Mat objects ----
+        // objectPoints: 6×1 CV_64FC3
+        Object objPtsMat = matCtor3i.newInstance(6, 1, 0x12 /* CV_64FC3 */);
+        // For CV_64FC3, we need to write 3 doubles per point
+        // Each point is stored as (x, y, z) in interleaved format
+        double[] objPtsFlat = new double[6 * 3];
+        for (int i = 0; i < 6; i++) {
+            objPtsFlat[i * 3]     = modelPts[i * 3];
+            objPtsFlat[i * 3 + 1] = modelPts[i * 3 + 1];
+            objPtsFlat[i * 3 + 2] = modelPts[i * 3 + 2];
+        }
+        putMatC3(objPtsMat, objPtsFlat, 6);
+
+        // imagePoints: 6×1 CV_64FC2
+        Object imgPtsMat = matCtor3i.newInstance(6, 1, 0x14 /* CV_64FC2 */);
+        putMatC2(imgPtsMat, imagePts, 6);
+
+        // cameraMatrix: 3×3 CV_64FC1
+        double focalLen = frameCols;  // focal length ≈ image width
+        double cx = frameCols / 2.0;
+        double cy = frameRows / 2.0;
+        Object camMat = matCtor3i.newInstance(3, 3, 0x12 /* CV_64FC1 */);
+        putMatD(camMat, new double[]{
+                focalLen, 0, cx,
+                0, focalLen, cy,
+                0, 0, 1
+        }, 3);
+
+        // distCoeffs: 5×1 CV_64FC1 (zero distortion)
+        Object distMat = matCtor3i.newInstance(5, 1, 0x12 /* CV_64FC1 */);
+        putMatD(distMat, new double[]{0, 0, 0, 0, 0}, 5);
+
+        // rvec + tvec: 3×1 CV_64FC1
+        Object rvec = matCtor3i.newInstance(3, 1, 0x12 /* CV_64FC1 */);
+        Object tvec = matCtor3i.newInstance(3, 1, 0x12 /* CV_64FC1 */);
+
+        // ---- Call solvePnP ----
+        boolean success = (boolean) solvePnPMethod.invoke(null,
+                objPtsMat, imgPtsMat, camMat, distMat, rvec, tvec, false);
+
+        if (!success) {
+            releaseMats(objPtsMat, imgPtsMat, camMat, distMat, rvec, tvec);
+            double[] geo = geometricPose(lm, frameCols, frameRows);
+            return new double[]{geo[0], geo[1], 0.0};
+        }
+
+        // ---- Extract rotation vector ----
+        double[] rvecArr = new double[3];
+        mGetD.invoke(rvec, 0, 0, rvecArr);
+        double rx = rvecArr[0], ry = rvecArr[1], rz = rvecArr[2];
+
+        releaseMats(objPtsMat, imgPtsMat, camMat, distMat, rvec, tvec);
+
+        // ---- Convert rotation vector to Euler angles ----
+        // rvec encodes rotation axis × angle (Rodrigues format)
+        // |rvec| = angle in radians, rvec/|rvec| = axis
+        double angle = Math.sqrt(rx * rx + ry * ry + rz * rz);
+        if (angle < 1e-8) {
+            return new double[]{0, 0, 0};
+        }
+
+        // Normalize axis
+        double ax = rx / angle, ay = ry / angle, az = rz / angle;
+
+        // Convert to Euler angles (ZYX convention: Yaw-Pitch-Roll)
+        // Using the closed-form from rotation vector
+        double sinA = Math.sin(angle);
+        double cosA = Math.cos(angle);
+        double ONE_COS = 1.0 - cosA;
+
+        // Build rotation matrix R from axis-angle
+        double r00 = cosA + ax * ax * ONE_COS;
+        double r01 = ax * ay * ONE_COS - az * sinA;
+        double r02 = ax * az * ONE_COS + ay * sinA;
+        double r10 = ay * ax * ONE_COS + az * sinA;
+        double r11 = cosA + ay * ay * ONE_COS;
+        double r12 = ay * az * ONE_COS - ax * sinA;
+        double r20 = az * ax * ONE_COS - ay * sinA;
+        double r21 = az * ay * ONE_COS + ax * sinA;
+        double r22 = cosA + az * az * ONE_COS;
+
+        // Euler angles from rotation matrix (ZYX convention)
+        // Yaw (Y-axis rotation): atan2(r10, r00)
+        double yawDeg = Math.toDegrees(Math.atan2(r10, r00));
+        // Pitch (X-axis rotation): atan2(-r20, sqrt(r21² + r22²))
+        double pitchDeg = Math.toDegrees(Math.atan2(-r20, Math.sqrt(r21 * r21 + r22 * r22)));
+        // Roll (Z-axis rotation): atan2(r21, r22)
+        double rollDeg = Math.toDegrees(Math.atan2(r21, r22));
+
+        return new double[]{
+                clamp(-90.0, 90.0, yawDeg),
+                clamp(-90.0, 90.0, pitchDeg),
+                clamp(-90.0, 90.0, rollDeg)
+        };
+    }
+
+    /** Write a CV_64FC3 Mat (3 channels, interleaved). */
+    private void putMatC3(Object mat, double[] data, int rows) throws Exception {
+        // For CV_64FC3, put takes rows×cols doubles; here 1 col, 3 channels
+        // The data is interleaved: [x0,y0,z0, x1,y1,z1, ...]
+        mPut.invoke(mat, 0, 0, data);
+    }
+
+    /** Write a CV_64FC2 Mat (2 channels, interleaved). */
+    private void putMatC2(Object mat, double[] data, int rows) throws Exception {
+        mPut.invoke(mat, 0, 0, data);
+    }
+
+    /** Write a CV_64FC1 Mat (single channel). */
+    private void putMatD(Object mat, double[] data, int rows) throws Exception {
+        mPut.invoke(mat, 0, 0, data);
+    }
+
+    private void releaseMats(Object... mats) {
+        for (Object m : mats) {
+            try { mRelease.invoke(m); } catch (Exception ignored) { }
+        }
+    }
+
+    /** Geometric pose estimation from landmark positions (fallback). */
     private double[] geometricPose(float[][][] lm, int frameCols, int frameRows) {
-        float[] noseTip   = lm[0][NOSE_TIP];
+        float[] noseTip    = lm[0][NOSE_TIP];
         float[] leftTemple  = lm[0][LEFT_TEMPLE];
         float[] rightTemple = lm[0][RIGHT_TEMPLE];
         float[] forehead    = lm[0][FOREHEAD];
         float[] chin        = lm[0][CHIN];
 
-        // Yaw: horizontal face angle from nose position relative to face center
         double faceCx = (leftTemple[0] + rightTemple[0]) / 2.0;
         double noseOffset = noseTip[0] - faceCx;
         double faceHalfW = (rightTemple[0] - leftTemple[0]) / 2.0;
         double yaw = faceHalfW > 1e-6 ? clamp(-45.0, 45.0, (noseOffset / faceHalfW) * 45.0) : 0.0;
 
-        // Pitch: vertical face angle from nose position relative to face center
         double faceCy = (forehead[1] + chin[1]) / 2.0;
         double noseVertOffset = noseTip[1] - faceCy;
         double faceHalfH = (chin[1] - forehead[1]) / 2.0;
