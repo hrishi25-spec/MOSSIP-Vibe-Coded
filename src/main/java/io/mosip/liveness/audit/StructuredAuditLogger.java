@@ -17,6 +17,11 @@ public final class StructuredAuditLogger implements AuditLogger {
         this.out = out;
     }
 
+    /** Factory for a stdout logger (convenience for quick setup). */
+    public static StructuredAuditLogger toStdout() {
+        return new StructuredAuditLogger(System.out);
+    }
+
     @Override
     public void log(AuditEvent event) {
         StringBuilder sb = new StringBuilder(160);
