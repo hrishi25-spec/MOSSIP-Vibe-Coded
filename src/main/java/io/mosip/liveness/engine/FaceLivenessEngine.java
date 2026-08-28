@@ -5,10 +5,13 @@ import io.mosip.liveness.audit.AuditEventType;
 import io.mosip.liveness.audit.AuditLogger;
 import io.mosip.liveness.audit.MetricsCollector;
 import io.mosip.liveness.backend.LivenessBackend;
+import io.mosip.liveness.challenge.ChallengeEvaluators;
 import io.mosip.liveness.config.EffectivePolicy;
 import io.mosip.liveness.config.LivenessConfig;
+import io.mosip.liveness.core.ActiveFrameResult;
 import io.mosip.liveness.core.Challenge;
-import io.mosip.liveness.core.ChallengeType;
+import io.mosip.liveness.core.ChallengeProgress;
+import io.mosip.liveness.core.CombinedLivenessScore;
 import io.mosip.liveness.core.FaceSignals;
 import io.mosip.liveness.core.Frame;
 import io.mosip.liveness.core.LivenessErrorCode;
@@ -31,9 +34,14 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>Flow: N consecutive passive frames are scored; the temporal median is
  * compared against the configured threshold. Median >= threshold (and no PAD
  * flag) proceeds. Below threshold escalates automatically to Stage-2
- * challenge-response with engine-selected randomized challenges. Any PAD hit
- * blocks the session terminally and is logged as a distinct audit event —
- * it never takes the retry path.</p>
+ * challenge-response with engine-selected randomized challenges. During
+ * challenges, each frame is evaluated by three subsystems: PAD, passive
+ * liveness scorer (re-evaluation), and active challenge evaluator. Any PAD
+ * hit blocks the session terminally.</p>
+ *
+ * <h3>Threading contract</h3>
+ * <p>Multi-session concurrent access is safe. A single session's frames
+ * must be pushed from one thread only.</p>
  */
 public final class FaceLivenessEngine implements LivenessPipeline {
 
@@ -45,11 +53,23 @@ public final class FaceLivenessEngine implements LivenessPipeline {
     private final Map<String, LivenessSession> sessions = new ConcurrentHashMap<>();
 
     public FaceLivenessEngine(LivenessConfig config, LivenessBackend backend) {
-        this(config, backend, AuditLogger.noop(), new MetricsCollector(), Clock.systemUTC());
+        this(config, backend, AuditLogger.noop(), new MetricsCollector(), Clock.systemUTC(), Map.of());
+    }
+
+    /** v3: accepts backend options forwarded to {@code backend.initialize()}. */
+    public FaceLivenessEngine(LivenessConfig config, LivenessBackend backend,
+                              Map<String, String> backendOptions) {
+        this(config, backend, AuditLogger.noop(), new MetricsCollector(), Clock.systemUTC(), backendOptions);
     }
 
     public FaceLivenessEngine(LivenessConfig config, LivenessBackend backend,
                               AuditLogger audit, MetricsCollector metrics, Clock clock) {
+        this(config, backend, audit, metrics, clock, Map.of());
+    }
+
+    public FaceLivenessEngine(LivenessConfig config, LivenessBackend backend,
+                              AuditLogger audit, MetricsCollector metrics, Clock clock,
+                              Map<String, String> backendOptions) {
         this.config = Objects.requireNonNull(config);
         this.backend = Objects.requireNonNull(backend);
         this.audit = Objects.requireNonNull(audit);
@@ -57,7 +77,7 @@ public final class FaceLivenessEngine implements LivenessPipeline {
         this.clock = Objects.requireNonNull(clock);
         config.validate();
         try {
-            backend.initialize(Map.of());
+            backend.initialize(backendOptions != null ? backendOptions : Map.of());
         } catch (RuntimeException e) {
             throw new LivenessException(LivenessErrorCode.DEVICE_CONNECTION_FAILURE,
                     "liveness backend initialization failed: " + e.getMessage(), e);
@@ -85,6 +105,15 @@ public final class FaceLivenessEngine implements LivenessPipeline {
         long startNanos = System.nanoTime();
         LivenessSession s = requireSession(sessionId);
 
+        // G3: session duration timeout — check on EVERY frame, even skipped ones
+        if (s.isSessionTimedOut(clock.millis()) && !s.isTerminal() && s.state() != LivenessSession.State.PASSED) {
+            s.fail(LivenessErrorCode.SESSION_TIMEOUT, SessionSummary.Outcome.FAILED_SESSION_TIMEOUT);
+            metrics.recordSessionEnd(true);
+            audit.log(AuditEvent.of(clock.millis(), sessionId, s.workflow(), AuditEventType.INTERNAL_ERROR)
+                    .field("code", "SESSION_TIMEOUT"));
+            return FrameAssessment.sessionTimedOut();
+        }
+
         if (s.state() == LivenessSession.State.PASSED) {
             return s.bypass() ? FrameAssessment.bypassed() : FrameAssessment.passed(s.lastMedianScore());
         }
@@ -98,21 +127,26 @@ public final class FaceLivenessEngine implements LivenessPipeline {
             return FrameAssessment.bypassed();
         }
 
+        // G7: frame sampling — skip frames per rate, but always check timeout above
+        if (!shouldProcessFrame(s)) {
+            return FrameAssessment.challengeInProgress();
+        }
+
         if (s.state() == LivenessSession.State.IN_CHALLENGE) {
-            checkChallengeDeadline(s);
-            // checkChallengeDeadline may have transitioned the state (timeout
-            // → ESCALATED, or budget exhausted → FAILED). Detect the change.
-            if (s.state() == LivenessSession.State.IN_CHALLENGE) {
-                // Still in challenge — no timeout detected yet.
-                return FrameAssessment.challengeInProgress();
-            }
-            if (s.isTerminal()) {
-                // Timeout exhausted the retry budget → return a failed assessment
-                // so the caller sees the terminal state without an exception.
-                return FrameAssessment.failed(s.errorCode(), s.lastMedianScore());
-            }
-            // Timeout moved us to ESCALATED; fall through to return
-            // ESCALATED_TO_ACTIVE so the host can requestChallenge().
+            // v3: During IN_CHALLENGE, evaluate each frame with full triple pipeline
+            return pushChallengeFrame(s, sessionId, frame, startNanos);
+        }
+
+        // G7: check challenge deadline for timeout even on sampled frames
+        checkChallengeDeadline(s);
+        if (s.state() == LivenessSession.State.IN_CHALLENGE) {
+            return FrameAssessment.challengeInProgress();
+        }
+        if (s.isTerminal()) {
+            return FrameAssessment.failed(s.errorCode(), s.lastMedianScore());
+        }
+        if (s.escalated()) {
+            return FrameAssessment.escalated(s.lastMedianScore());
         }
 
         try {
@@ -128,7 +162,6 @@ public final class FaceLivenessEngine implements LivenessPipeline {
                 return reject(s, LivenessErrorCode.POOR_FACE_QUALITY);
             }
 
-            // PAD runs on EVERY assessment — passive and active.
             PadVerdict pad = safely(() -> backend.assessPad(frame, signals));
             if (pad.attackDetected()) {
                 return blockForPad(s, pad);
@@ -143,7 +176,6 @@ public final class FaceLivenessEngine implements LivenessPipeline {
                     return decidePassiveStage(s);
                 }
             } else if (s.escalated()) {
-                // Once escalated we stay in Stage 2; passive scoring no longer applies.
                 return FrameAssessment.escalated(s.lastMedianScore());
             }
             return FrameAssessment.scoring(score);
@@ -155,10 +187,87 @@ public final class FaceLivenessEngine implements LivenessPipeline {
         }
     }
 
+    /**
+     * v3: Frame-by-frame evaluation during the active challenge window.
+     * Runs triple pipeline: PAD + passive re-evaluation + active challenge evaluator.
+     */
+    private FrameAssessment pushChallengeFrame(LivenessSession s, String sessionId,
+                                               Frame frame, long startNanos) {
+        checkChallengeDeadline(s);
+        if (s.state() == LivenessSession.State.IN_CHALLENGE) {
+            // Still in challenge — evaluate the frame
+        } else if (s.isTerminal()) {
+            return FrameAssessment.failed(s.errorCode(), s.lastMedianScore());
+        } else {
+            // Timeout moved us to ESCALATED
+            return FrameAssessment.escalated(s.lastMedianScore());
+        }
+
+        try {
+            FaceSignals signals = safely(() -> backend.analyzeFrame(frame));
+
+            if (signals.faceCount() == 0) {
+                return reject(s, LivenessErrorCode.FACE_NOT_DETECTED);
+            }
+            if (signals.faceCount() > 1) {
+                return reject(s, LivenessErrorCode.MULTIPLE_FACES_DETECTED);
+            }
+
+            // 1. PAD check — runs on every frame, active or passive
+            PadVerdict pad = safely(() -> backend.assessPad(frame, signals));
+            if (pad.attackDetected()) {
+                return blockForPad(s, pad);
+            }
+
+            // 2. Passive re-evaluation (G1) — run passive scorer even during active challenge
+            double passiveScore = safely(() -> backend.scorePassiveLiveness(frame, signals));
+            s.addActivePassiveScore(passiveScore);
+
+            // 3. Active challenge evaluator (G2) — frame-by-frame with progress
+            Challenge challenge = s.currentChallenge();
+            ChallengeEvaluators.FrameChallengeResult challengeResult =
+                    ChallengeEvaluators.evaluateFrame(challenge, signals,
+                            s.actionDetectedThisChallenge() ? 1 : 0);
+            s.recordChallengeProgress(challengeResult.progress());
+
+            // 4. Combined score (G10)
+            double activeComponent = challengeResult.actionDetected() ? 1.0 : 0.0;
+            double combined = s.policy().combinedPassiveWeight() * passiveScore
+                    + s.policy().combinedActiveWeight() * activeComponent;
+            CombinedLivenessScore combinedScore = new CombinedLivenessScore(
+                    passiveScore, activeComponent, combined);
+
+            metrics.recordProcessingTime((System.nanoTime() - startNanos) / 1_000_000.0);
+
+            // 5. Check passive re-evaluation failure (G1)
+            if (s.passiveScoreFailedDuringActive(s.policy().passiveThresholdActive())) {
+                s.fail(LivenessErrorCode.ACTIVE_REEVAL_FAILED,
+                        SessionSummary.Outcome.FAILED_LIVENESS);
+                metrics.recordSessionEnd(true);
+                audit.log(AuditEvent.of(clock.millis(), sessionId, s.workflow(), AuditEventType.LIVENESS_FAILED)
+                        .field("reason", "passive_reeval_during_active")
+                        .field("passiveScore", fmt(passiveScore)));
+                return FrameAssessment.failed(LivenessErrorCode.ACTIVE_REEVAL_FAILED, passiveScore);
+            }
+
+            return FrameAssessment.challengeEvaluated(challengeResult.progress(), combinedScore);
+        } catch (LivenessException e) {
+            metrics.recordProcessingTime((System.nanoTime() - startNanos) / 1_000_000.0);
+            audit.log(AuditEvent.of(clock.millis(), sessionId, s.workflow(), AuditEventType.INTERNAL_ERROR)
+                    .field("code", e.errorCode().name()));
+            throw e;
+        }
+    }
+
+    // G7: frame sampling — process 1 in N frames based on config (per-session counter)
+    private boolean shouldProcessFrame(LivenessSession s) {
+        return s.incrementAndCheckFrameSampling();
+    }
+
     private FrameAssessment decidePassiveStage(LivenessSession s) {
         double median = s.medianScore();
         double threshold = s.policy().passiveThreshold();
-        var decision = LivenessDecisionLogic.decidePassive(median, threshold, false /* pad already blocked above */);
+        var decision = LivenessDecisionLogic.decidePassive(median, threshold, false);
 
         audit.log(AuditEvent.of(clock.millis(), s.sessionId(), s.workflow(), AuditEventType.FRAME_SCORED)
                 .field("median", fmt(median))
@@ -185,7 +294,7 @@ public final class FaceLivenessEngine implements LivenessPipeline {
                         .field("median", fmt(median)).field("threshold", threshold));
                 return FrameAssessment.failed(LivenessErrorCode.LIVENESS_SCORE_BELOW_THRESHOLD, median);
             }
-            default -> throw new IllegalStateException("unexpected outcome"); // PAD handled earlier
+            default -> throw new IllegalStateException("unexpected outcome");
         }
     }
 
@@ -200,7 +309,6 @@ public final class FaceLivenessEngine implements LivenessPipeline {
         s.fail(LivenessErrorCode.PAD_FAILURE, SessionSummary.Outcome.PAD_BLOCKED);
         metrics.recordPadBlock();
         metrics.recordSessionEnd(true);
-        // Distinct audit event for PAD — kept separate from liveness-quality misses.
         audit.log(AuditEvent.of(clock.millis(), s.sessionId(), s.workflow(), AuditEventType.PAD_BLOCKED)
                 .field("attackType", pad.attackType().name())
                 .field("confidence", fmt(pad.confidence())));
@@ -259,12 +367,20 @@ public final class FaceLivenessEngine implements LivenessPipeline {
                 blockForPad(s, pad);
                 return ValidationResult.padBlocked();
             }
+            // v3: passive re-evaluation in batch mode too
+            double passiveScore = safely(() -> backend.scorePassiveLiveness(f, sig));
+            s.addActivePassiveScore(passiveScore);
+            if (s.passiveScoreFailedDuringActive(s.policy().passiveThresholdActive())) {
+                s.fail(LivenessErrorCode.ACTIVE_REEVAL_FAILED, SessionSummary.Outcome.FAILED_LIVENESS);
+                metrics.recordSessionEnd(true);
+                return ValidationResult.hardFailure(LivenessErrorCode.ACTIVE_REEVAL_FAILED);
+            }
             sequence.add(sig);
         }
 
         Challenge challenge = s.currentChallenge();
         long completionMs = clock.millis() - s.challengeStartedAtMillis();
-        boolean passed = io.mosip.liveness.challenge.ChallengeEvaluators.evaluate(challenge, sequence);
+        boolean passed = ChallengeEvaluators.evaluate(challenge, sequence);
 
         if (passed) {
             s.registerChallengeSuccess();
@@ -280,8 +396,6 @@ public final class FaceLivenessEngine implements LivenessPipeline {
                         AuditEventType.PASSIVE_PASSED).field("viaActive", true));
                 return ValidationResult.finalPass();
             }
-            // More challenges required — go back to ESCALATED so the host
-            // can call requestChallenge() for the next one.
             s.awaitNextChallenge();
             return ValidationResult.partialPass(remaining);
         }
@@ -289,7 +403,6 @@ public final class FaceLivenessEngine implements LivenessPipeline {
         return failChallenge(s, "signal_not_matched");
     }
 
-    /** Registers a failure, applies timeout/retry policy, returns the result. */
     private ValidationResult failChallenge(LivenessSession s, String reason) {
         s.registerChallengeFailure();
         metrics.recordRetry();
@@ -313,7 +426,7 @@ public final class FaceLivenessEngine implements LivenessPipeline {
         if (s.state() != LivenessSession.State.IN_CHALLENGE) return;
         if (clock.millis() <= s.challengeDeadlineMillis()) return;
         Challenge issued = s.currentChallenge();
-        s.registerChallengeFailure();   // a timeout consumes one unit of the retry budget
+        s.registerChallengeFailure();
         metrics.recordRetry();
         audit.log(AuditEvent.of(clock.millis(), s.sessionId(), s.workflow(), AuditEventType.CHALLENGE_TIMEOUT)
                 .field("type", issued == null ? "unknown" : issued.type().name())
@@ -341,7 +454,6 @@ public final class FaceLivenessEngine implements LivenessPipeline {
     }
 
     private boolean retryBudgetExhausted(LivenessSession s) {
-        // initial attempt + maxRetries retries
         return s.challengeAttempts() >= 1 + s.policy().maxRetries();
     }
 
