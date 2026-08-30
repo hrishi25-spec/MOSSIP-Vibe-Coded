@@ -179,8 +179,23 @@ public final class AttackScenarioHarness {
                 add(frames);
                 mock.enqueueSignal(liveSignals(0.34, 0, 0, 0, 0));
             }
+            case LOOK_UP -> gazeFrames(frames, mock, 0.0, -1.0);
+            case LOOK_DOWN -> gazeFrames(frames, mock, 0.0, 1.0);
+            case LOOK_LEFT -> gazeFrames(frames, mock, -1.0, 0.0);
+            case LOOK_RIGHT -> gazeFrames(frames, mock, 1.0, 0.0);
         }
         return frames;
+    }
+
+    private void gazeFrames(List<Frame> frames, MockLivenessBackend mock, double dx, double dy) {
+        add(frames);
+        mock.enqueueSignal(liveSignals(0.34, 0, 0, 0, 0));
+        add(frames);
+        mock.enqueueSignal(liveSignals(0.34, 0, 0, dx, dy));
+        add(frames);
+        mock.enqueueSignal(liveSignals(0.34, 0, 0, dx, dy));
+        add(frames);
+        mock.enqueueSignal(liveSignals(0.34, 0, 0, 0, 0));
     }
 
     private void configure(MockLivenessBackend.Subject subject, PresentationLabel label, SplittableRandom rng) {
