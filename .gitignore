@@ -4,3 +4,15 @@ target/
 .idea/
 .vscode/
 models/
+
+# Training data (face images must never be committed)
+training/data/
+training/models/
+training/scripts/__pycache__/
+*.keras
+*.tflite
+__pycache__/
+
+# Backup files
+*.bak
+*.log

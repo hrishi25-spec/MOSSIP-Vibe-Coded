@@ -23,8 +23,11 @@
 /home/hriishiibanerjee/Documents/MOSSIP-Vibe-Coded/src/main/java/io/mosip/liveness/config/EffectivePolicy.java
 /home/hriishiibanerjee/Documents/MOSSIP-Vibe-Coded/src/main/java/io/mosip/liveness/config/LivenessConfig.java
 /home/hriishiibanerjee/Documents/MOSSIP-Vibe-Coded/src/main/java/io/mosip/liveness/config/LivenessPolicy.java
+/home/hriishiibanerjee/Documents/MOSSIP-Vibe-Coded/src/main/java/io/mosip/liveness/core/ActiveFrameResult.java
 /home/hriishiibanerjee/Documents/MOSSIP-Vibe-Coded/src/main/java/io/mosip/liveness/core/Challenge.java
+/home/hriishiibanerjee/Documents/MOSSIP-Vibe-Coded/src/main/java/io/mosip/liveness/core/ChallengeProgress.java
 /home/hriishiibanerjee/Documents/MOSSIP-Vibe-Coded/src/main/java/io/mosip/liveness/core/ChallengeType.java
+/home/hriishiibanerjee/Documents/MOSSIP-Vibe-Coded/src/main/java/io/mosip/liveness/core/CombinedLivenessScore.java
 /home/hriishiibanerjee/Documents/MOSSIP-Vibe-Coded/src/main/java/io/mosip/liveness/core/FaceSignals.java
 /home/hriishiibanerjee/Documents/MOSSIP-Vibe-Coded/src/main/java/io/mosip/liveness/core/Frame.java
 /home/hriishiibanerjee/Documents/MOSSIP-Vibe-Coded/src/main/java/io/mosip/liveness/core/LivenessErrorCode.java
