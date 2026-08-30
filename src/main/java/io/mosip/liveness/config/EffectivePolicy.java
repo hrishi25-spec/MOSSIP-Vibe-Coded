@@ -17,7 +17,22 @@ public record EffectivePolicy(
         int maxRetries,
         long challengeTimeoutMs,
         Set<ChallengeType> allowedChallenges,
-        RepeatedFailureAction onRepeatedFailure) {
+        RepeatedFailureAction onRepeatedFailure,
+        double passiveThresholdActive,
+        // v3 fields
+        long maxSessionDurationMs,
+        int frameSamplingRate,
+        int frameSamplingMinFps,
+        double combinedPassiveWeight,
+        double combinedActiveWeight
+) {
+    /**
+     * Secondary passive threshold for active challenge window.
+     * Configured separately; defaults to passiveThreshold.
+     */
+    public double passiveThresholdActive() {
+        return passiveThresholdActive;
+    }
 
     public String summary() {
         return "threshold=" + passiveThreshold
