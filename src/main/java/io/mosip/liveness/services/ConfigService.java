@@ -67,7 +67,14 @@ public class ConfigService {
                 db.getMaxRetryCount() != null ? db.getMaxRetryCount() : 3,
                 db.getChallengeTimeoutMs() != null ? db.getChallengeTimeoutMs() : 8000L,
                 challenges,
-                mapFailurePolicy(db.getOnRepeatedFailure()));
+                mapFailurePolicy(db.getOnRepeatedFailure()),
+                // v3 fields
+                -1.0,  // passiveThresholdActive (sentinel: use passiveThreshold)
+                30000L, // maxSessionDurationMs
+                1,      // frameSamplingRate
+                10,     // frameSamplingMinFps
+                0.6,    // combinedPassiveWeight
+                0.4);   // combinedActiveWeight
     }
 
     // ---- Enum conversions between core and models layers ----
@@ -98,6 +105,10 @@ public class ConfigService {
             case "TURN_LEFT" -> ChallengeType.TURN_HEAD_LEFT;
             case "TURN_RIGHT" -> ChallengeType.TURN_HEAD_RIGHT;
             case "LOOK_DIRECTION" -> ChallengeType.LOOK_DIRECTION;
+            case "LOOK_UP" -> ChallengeType.LOOK_UP;
+            case "LOOK_DOWN" -> ChallengeType.LOOK_DOWN;
+            case "LOOK_LEFT" -> ChallengeType.LOOK_LEFT;
+            case "LOOK_RIGHT" -> ChallengeType.LOOK_RIGHT;
             default -> ChallengeType.BLINK; // safe fallback
         };
     }
@@ -110,6 +121,10 @@ public class ConfigService {
             case TURN_HEAD_LEFT -> io.mosip.liveness.models.enums.ChallengeType.TURN_LEFT;
             case TURN_HEAD_RIGHT -> io.mosip.liveness.models.enums.ChallengeType.TURN_RIGHT;
             case LOOK_DIRECTION -> io.mosip.liveness.models.enums.ChallengeType.LOOK_DIRECTION;
+            case LOOK_UP -> io.mosip.liveness.models.enums.ChallengeType.LOOK_UP;
+            case LOOK_DOWN -> io.mosip.liveness.models.enums.ChallengeType.LOOK_DOWN;
+            case LOOK_LEFT -> io.mosip.liveness.models.enums.ChallengeType.LOOK_LEFT;
+            case LOOK_RIGHT -> io.mosip.liveness.models.enums.ChallengeType.LOOK_RIGHT;
         };
     }
 
@@ -128,6 +143,13 @@ public class ConfigService {
                 1, 3, 8000L,
                 EnumSet.of(ChallengeType.BLINK, ChallengeType.SMILE,
                         ChallengeType.TURN_HEAD_LEFT, ChallengeType.TURN_HEAD_RIGHT),
-                RepeatedFailureAction.LOCK_OUT);
+                RepeatedFailureAction.LOCK_OUT,
+                // v3 fields
+                -1.0,   // passiveThresholdActive
+                30000L, // maxSessionDurationMs
+                1,      // frameSamplingRate
+                10,     // frameSamplingMinFps
+                0.6,    // combinedPassiveWeight
+                0.4);   // combinedActiveWeight
     }
 }
