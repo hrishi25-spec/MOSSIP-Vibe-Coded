@@ -112,7 +112,114 @@ messages only).
 
 ## Running locally
 
-### 1. With Docker (recommended)
+### 1. One command — `start.sh` / `start.bat`
+
+Builds if needed, starts the service, waits until it reports healthy, then opens
+the browser console. Runs on **macOS, Linux and Windows** and needs only a
+**JDK 17+** — Maven is not required, because the bundled Maven wrapper fetches it.
+
+```bash
+./start.sh                 # macOS / Linux / Git Bash
+```
+
+```bat
+start.bat                  rem Windows
+```
+
+| Option | Effect |
+|---|---|
+| `--no-build` | skip Maven and relaunch the existing jar (fast restart) |
+| `--rebuild` | clean build plus the full test suite |
+| `--test` | run tests during the build |
+| `--port N` | serve on port N (default 8000) |
+| `--profile NAME` | Spring profile: `dev` (H2, default) or `default` (PostgreSQL) |
+| `--no-browser` | do not open a browser |
+
+A successful launch looks like:
+
+```
+✓ JDK 21 → /opt/homebrew/Cellar/openjdk@21/.../bin/java
+✓ Build complete
+✓ Port 8000 is free
+✓ Service is up (started in 5s)
+  Console      http://localhost:8000/
+  API docs     http://localhost:8000/swagger-ui/index.html
+  Health       http://localhost:8000/health
+  Engine       available (OpenCV native library loaded)
+```
+
+Press `Ctrl+C` (or any key in the Windows window) to stop the service cleanly.
+Both scripts fail fast with an actionable message if the JDK is too old, the port
+is taken, the build breaks, or the service never becomes healthy.
+
+### 2. Browser console
+
+`http://localhost:8000/` serves a **zero-dependency test console** that drives the
+real API — no build step and no CDN, so it works fully offline. It creates a
+session, captures webcam frames, runs passive liveness, performs the active
+challenge, and shows the decision log, audit trail and operational metrics side
+by side.
+
+It must be opened at `localhost`: browsers only expose the camera on a secure
+origin, and `localhost` counts as one.
+
+### 3. Without Docker — manual quick start (H2)
+
+Requires only **JDK 17+** (verified on JDK 21). No PostgreSQL, no Docker.
+
+```bash
+# Build the executable jar (also runs the full test suite)
+./mvnw clean package
+
+# Run with the dev profile: in-memory H2, schema created by Hibernate
+java -jar target/pad-liveness-backend-1.0.0-SNAPSHOT.jar --spring.profiles.active=dev
+```
+
+Then check it is up:
+
+```bash
+curl localhost:8000/health
+# {"status":"ok","service":"MOSIP Face Liveness & PAD Service","engine":"available"}
+```
+
+OpenAPI UI: `http://localhost:8000/swagger-ui/index.html`
+
+### 4. Against PostgreSQL (default profile)
+
+Set the `POSTGRES_*` variables (or create `.env` from `.env.example`) and run
+**without** `--spring.profiles.active=dev`. Flyway applies
+`db/migration/V1__init_schema.sql` on startup and Hibernate validates the schema
+(`ddl-auto: validate`) rather than creating it:
+
+```bash
+POSTGRES_HOST=localhost POSTGRES_USER=mosip POSTGRES_PASSWORD=... POSTGRES_DB=pad_liveness \
+  java -jar target/pad-liveness-backend-1.0.0-SNAPSHOT.jar
+```
+
+There is no Flyway Maven plugin configured; migrations are applied by the
+application at startup, and `spring.flyway.baseline-on-migrate: true` is set.
+
+### 5. Haar cascade data (bundled)
+
+Face detection needs OpenCV's `haarcascade_frontalface_default.xml` and
+`haarcascade_eye.xml`. OpenCV's Java bindings do not ship them, so they are
+**vendored in `src/main/resources/`** and loaded from the classpath (with a
+filesystem fallback). Both files retain their original Intel/OpenCV BSD-3-Clause
+licence header.
+
+If they are ever removed, the service does not fail — it silently reports
+`faceDetected: false` for every frame and no session can pass, logging a single
+clear warning on the first detection attempt. `ImageUtilsCascadeTest` fails the
+build in that case rather than letting it regress.
+
+A real face passes the pipeline end to end:
+
+```
+{"faceDetected": true, "faceQuality": 0.87, "livenessScore": 0.90,
+ "padFlag": false, "action": "proceed", "message": "Liveness verified."}
+```
+
+### 6. With Docker (alternative)
 
 ```bash
 cp .env.example .env      # edit credentials as needed
@@ -120,36 +227,6 @@ docker compose up --build
 ```
 
 API available at `http://localhost:8000`, docs at `http://localhost:8000/swagger-ui.html`.
-
-### 2. Without Docker
-
-```bash
-# Prerequisites: Java 17+, PostgreSQL (or use dev profile for H2)
-
-# Build the JAR
-mvn clean package -DskipTests
-
-# Run with PostgreSQL
-java -jar target/pad-liveness-backend-1.0.0-SNAPSHOT.jar
-
-# Or run with dev profile (H2 in-memory DB, no PostgreSQL needed)
-java -jar target/pad-liveness-backend-1.0.0-SNAPSHOT.jar --spring.profiles.active=dev
-
-# Or run with Maven directly
-mvn spring-boot:run -Dspring-boot.run.profiles=dev
-```
-
-### 3. Database migrations (Flyway)
-
-Flyway runs automatically on startup. For manual migration management:
-
-```bash
-# Generate migration (requires a running DB with Hibernate auto-ddl)
-mvn flyway:migrate
-
-# Check migration status
-mvn flyway:info
-```
 
 ## Example flow (curl)
 

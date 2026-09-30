@@ -1,3 +1,7 @@
+server:
+  # Matches the Dockerfile EXPOSE / docker-compose port mapping and the README examples.
+  port: ${SERVER_PORT:8000}
+
 spring:
   application:
     name: pad-liveness-backend

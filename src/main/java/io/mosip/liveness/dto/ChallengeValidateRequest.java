@@ -1,7 +1,6 @@
 package io.mosip.liveness.dto;
 
-import jakarta.validation.constraints.Min;
-import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.NotEmpty;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -21,7 +20,9 @@ import java.util.UUID;
 @Builder
 public class ChallengeValidateRequest {
 
-    @NotBlank(message = "challenge_id is required")
+    // Must be @NotNull, not @NotBlank: @NotBlank only validates CharSequence and
+    // Hibernate Validator throws UnexpectedTypeException (HTTP 500) on a UUID.
+    @NotNull(message = "challenge_id is required")
     private UUID challengeId;
 
     @NotEmpty(message = "frames_base64 must contain at least one frame")
