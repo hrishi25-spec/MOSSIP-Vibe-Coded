@@ -20,3 +20,5 @@ __pycache__/
 *.bak
 *.log
 target/
+vendor/SKILLS-INTEGRATION.zip
+target/
