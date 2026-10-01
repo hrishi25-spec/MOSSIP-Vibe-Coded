@@ -1,4 +1,4 @@
 -------------------------------------------------------------------------------
 Test set: io.mosip.liveness.device.DeviceAdapterTest
 -------------------------------------------------------------------------------
-Tests run: 31, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 1.387 s -- in io.mosip.liveness.device.DeviceAdapterTest
+Tests run: 31, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 5.109 s -- in io.mosip.liveness.device.DeviceAdapterTest
