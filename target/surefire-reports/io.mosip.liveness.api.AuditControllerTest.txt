@@ -1,4 +1,0 @@
--------------------------------------------------------------------------------
-Test set: io.mosip.liveness.api.AuditControllerTest
--------------------------------------------------------------------------------
-Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 25.17 s -- in io.mosip.liveness.api.AuditControllerTest
