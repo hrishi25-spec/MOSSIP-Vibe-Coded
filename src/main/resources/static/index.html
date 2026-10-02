@@ -53,6 +53,19 @@
   .verdict.proceed{border-color:#1d5b42;background:#12241c}
   .verdict.reject{border-color:#5b1d20;background:#241214}
   .verdict.escalate{border-color:#5b4a1d;background:#241f12}
+  /* Big icon + short word for each challenge, so the instruction reads without
+     language or literacy. The overlay sits on the video but outside the video's
+     mirrored transform, so the symbol itself is never flipped. */
+  .video-wrap{position:relative;border-radius:8px;overflow:hidden}
+  .cue{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:14px;
+    padding:16px;background:linear-gradient(180deg,rgba(15,18,22,0),rgba(15,18,22,.94) 40%)}
+  .cue .icon{font-size:56px;line-height:1}
+  .cue .txt{display:flex;flex-direction:column}
+  .cue .label{font-size:21px;font-weight:700}
+  .cue .sub{font-size:12.5px;color:var(--muted);margin-top:2px}
+  .cue.flash .icon{animation:cuepop .45s ease}
+  @keyframes cuepop{0%{transform:scale(.55)}60%{transform:scale(1.18)}100%{transform:scale(1)}}
+  .icon-lg{margin-right:7px}
   pre{margin:0;font:12px/1.5 var(--mono);white-space:pre-wrap;word-break:break-word;
     max-height:260px;overflow:auto;color:#b9c4d2}
   .kv{display:grid;grid-template-columns:auto 1fr;gap:5px 12px;font-size:12.5px}
@@ -93,7 +106,16 @@
           <span class="step" id="s4">4 · Verdict</span>
         </div>
 
-        <video id="video" autoplay playsinline muted></video>
+        <div class="video-wrap">
+          <video id="video" autoplay playsinline muted></video>
+          <div class="cue" id="cue" role="status" aria-live="polite" hidden>
+            <span class="icon" id="cue-icon" aria-hidden="true"></span>
+            <span class="txt">
+              <span class="label" id="cue-label"></span>
+              <span class="sub" id="cue-sub"></span>
+            </span>
+          </div>
+        </div>
 
         <div class="row" style="margin-top:12px">
           <label class="field">Workflow
@@ -194,11 +216,20 @@
       dl.append(dt, dd);
     }
   }
-  function verdict(kind, action, message) {
+  function verdict(kind, action, message, icon) {
     const box = $("verdict");
     box.hidden = false;
     box.className = "verdict " + (kind || "");
-    $("verdict-action").textContent = action || "";
+    const a = $("verdict-action");
+    a.textContent = "";
+    if (icon) {
+      const s = document.createElement("span");
+      s.className = "icon-lg";
+      s.setAttribute("aria-hidden", "true");
+      s.textContent = icon;
+      a.append(s);
+    }
+    a.append(document.createTextNode(action || ""));
     $("verdict-msg").textContent = message || "";
   }
 
@@ -225,6 +256,39 @@
   }
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  // Icon + short word for every challenge, so the instruction can be understood
+  // without reading a sentence or knowing the language. The word remains the
+  // accessible label; the icon is decorative.
+  const CHALLENGE_CUES = {
+    BLINK:           { icon: "👁️", label: "Blink your eyes" },
+    SMILE:           { icon: "😊", label: "Smile" },
+    TURN_LEFT:       { icon: "👈", label: "Turn head left" },
+    TURN_RIGHT:      { icon: "👉", label: "Turn head right" },
+    TURN_HEAD_LEFT:  { icon: "👈", label: "Turn head left" },
+    TURN_HEAD_RIGHT: { icon: "👉", label: "Turn head right" },
+    LOOK_DIRECTION:  { icon: "🧭", label: "Look as shown" },
+    LOOK_UP:         { icon: "☝️", label: "Look up" },
+    LOOK_DOWN:       { icon: "👇", label: "Look down" },
+    LOOK_LEFT:       { icon: "👈", label: "Look left" },
+    LOOK_RIGHT:      { icon: "👉", label: "Look right" }
+  };
+  // Unknown/new challenge types still get a symbol and their raw name rather
+  // than an empty overlay.
+  function challengeCue(type) {
+    const key = String(type || "").toUpperCase();
+    return CHALLENGE_CUES[key]
+      || { icon: "🔎", label: key ? key.replace(/_/g, " ").toLowerCase() : "Follow the instruction" };
+  }
+  function showCue(icon, label, sub, flash = true) {
+    const el = $("cue");
+    el.hidden = false;
+    $("cue-icon").textContent = icon;
+    $("cue-label").textContent = label;
+    $("cue-sub").textContent = sub || "";
+    if (flash) { el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash"); }
+  }
+  function hideCue() { $("cue").hidden = true; }
 
   // ---------- health ----------
   async function refreshHealth() {
@@ -273,6 +337,7 @@
     $("btn-run").disabled = true;
     $("btn-stop").disabled = false;
     resetSteps();
+    hideCue();
     $("audit").textContent = "No entries yet.";
     $("last").innerHTML = "<dt>—</dt><dd>—</dd>";
 
@@ -329,19 +394,29 @@
         setStep(3, "done");
         setStep(4, "active");
         if (outcome && outcome.action === "proceed") {
-          verdict("proceed", "PROCEED", outcome.message || "Liveness verified.");
+          verdict("proceed", "PROCEED", outcome.message || "Liveness verified.", "✅");
         } else if (outcome) {
-          verdict("reject", "REJECT", outcome.message || "Liveness could not be verified.");
+          verdict("reject", "REJECT", outcome.message || "Liveness could not be verified.", "⛔");
         } else {
-          verdict("", "INCOMPLETE", "No terminal verdict was reached.");
+          verdict("", "INCOMPLETE", "No terminal verdict was reached.", "🤔");
         }
         setStep(4, "done");
+        // Keep the outcome on the video instead of clearing the cue: right after
+        // the action, the result panel below the fold is easy to miss.
+        if (outcome && outcome.action === "proceed") {
+          showCue("✅", "Verified", "Liveness check passed");
+        } else if (outcome) {
+          showCue("⛔", "Not verified", outcome.message || "Liveness could not be verified.");
+        } else {
+          showCue("🤔", "Incomplete", "No terminal verdict was reached.");
+        }
       }
       await refreshAudit();
       await refreshMetrics();
     } catch (e) {
       log("ERROR: " + e.message);
-      verdict("reject", "ERROR", e.message);
+      verdict("reject", "ERROR", e.message, "⚠️");
+      showCue("⚠️", "Error", e.message);
     } finally {
       running = false;
       $("btn-run").disabled = false;
@@ -357,10 +432,12 @@
       rounds++;
       lastChallenge = challenge;
       const readable = challenge.challengeType.replace(/_/g, " ").toLowerCase();
+      const cue = challengeCue(challenge.challengeType);
+      showCue(cue.icon, cue.label, `Perform "${readable}" — hold the pose`);
       log(`challenge ${rounds}: ${challenge.challengeType} (timeout ${challenge.timeoutMs}ms)`
         + ` — perform "${readable}" and hold it`);
       verdict("escalate", "ACTION REQUIRED",
-        (escalation.message || `Please ${readable}.`) + " Hold the pose until capture finishes.");
+        (escalation.message || `Please ${readable}.`) + " Hold the pose until capture finishes.", cue.icon);
       await sleep(1600); // time to react before the capture window opens
 
       // The evaluators compare the first and last frame of the burst, and a blink
@@ -370,7 +447,8 @@
       const FRAME_COUNT = 16;
       for (let f = 0; f < FRAME_COUNT && running; f++) {
         frames.push(grabFrame(0.9));
-        verdict("escalate", "CAPTURING…", `Perform "${readable}" — ${f + 1}/${FRAME_COUNT}`);
+        showCue(cue.icon, cue.label, `Hold the pose — ${f + 1}/${FRAME_COUNT}`, false);
+        verdict("escalate", "CAPTURING…", `Perform "${readable}" — ${f + 1}/${FRAME_COUNT}`, cue.icon);
         await sleep(150);
       }
       // The two challenge shapes disagree on the id field:
@@ -385,6 +463,7 @@
         body: JSON.stringify({ challengeId, framesBase64: frames })
       });
       log(`challenge ${rounds} result: passed=${r.passed} action=${r.action} ${r.message || ""}`);
+      if (r.passed) showCue("✅", "Action detected", "Good — hold still");
 
       if (r.action === "proceed" || r.action === "reject") {
         return { action: r.action, message: r.message };
