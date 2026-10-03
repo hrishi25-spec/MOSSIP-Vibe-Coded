@@ -57,7 +57,7 @@ public class ConfigPolicy {
 
     @Column(name = "passive_threshold", nullable = false)
     @Builder.Default
-    private Double passiveThreshold = 0.75;
+    private Double passiveThreshold = io.mosip.liveness.config.LivenessConfig.DEFAULT_PASSIVE_THRESHOLD;
 
     @Column(name = "active_liveness_enabled", nullable = false)
     @Builder.Default
@@ -74,9 +74,10 @@ public class ConfigPolicy {
     private List<String> challengeTypes =
             new ArrayList<>(List.of("blink", "smile", "turn_left", "turn_right"));
 
+    /** Challenge window; a full minute so a person has time to perform the action. */
     @Column(name = "challenge_timeout_ms", nullable = false)
     @Builder.Default
-    private Integer challengeTimeoutMs = 8000;
+    private Integer challengeTimeoutMs = 15_000;
 
     @Column(name = "max_retry_count", nullable = false)
     @Builder.Default

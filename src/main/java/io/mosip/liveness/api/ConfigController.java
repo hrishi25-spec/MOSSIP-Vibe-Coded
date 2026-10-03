@@ -107,11 +107,11 @@ public class ConfigController {
             ConfigPolicy policy = ConfigPolicy.builder()
                     .workflowType(workflowType)
                     .livenessEnabled(true)
-                    .passiveThreshold(0.75)
+                    .passiveThreshold(io.mosip.liveness.config.LivenessConfig.DEFAULT_PASSIVE_THRESHOLD)
                     .activeLivenessEnabled(true)
                     .minChallengeCount(1)
                     .challengeTypes(List.of("blink", "smile", "turn_left", "turn_right"))
-                    .challengeTimeoutMs(8000)
+                    .challengeTimeoutMs((int) io.mosip.liveness.config.LivenessConfig.DEFAULT_CHALLENGE_TIMEOUT_MS)
                     .maxRetryCount(3)
                     .onRepeatedFailure(FailurePolicy.LOCK)
                     .build();

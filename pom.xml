@@ -82,6 +82,16 @@
       <version>4.9.0-0</version>
     </dependency>
 
+    <!-- ONNX Runtime: desktop-JVM inference for the MiniFASNet face
+         anti-spoofing model (Apache-2.0). The TFLite runtime is an
+         Android-only AAR (see docs/status-report.md §4), so ONNX Runtime is
+         the offline, cross-platform path for the same weights. -->
+    <dependency>
+      <groupId>com.microsoft.onnxruntime</groupId>
+      <artifactId>onnxruntime</artifactId>
+      <version>1.24.2</version>
+    </dependency>
+
     <!-- Lombok (reduce boilerplate) -->
     <dependency>
       <groupId>org.projectlombok</groupId>

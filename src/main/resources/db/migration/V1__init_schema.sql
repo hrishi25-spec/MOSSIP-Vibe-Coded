@@ -69,7 +69,7 @@ CREATE TABLE config_policies (
     -- explicit converter so the schema behaves identically on H2 (dev) and
     -- PostgreSQL, and neither column is ever queried with JSON operators.
     challenge_types TEXT NOT NULL DEFAULT '["blink","smile","turn_left","turn_right"]',
-    challenge_timeout_ms INTEGER NOT NULL DEFAULT 8000,
+    challenge_timeout_ms INTEGER NOT NULL DEFAULT 60000,
     max_retry_count INTEGER NOT NULL DEFAULT 3,
     on_repeated_failure VARCHAR(16) NOT NULL DEFAULT 'LOCK',
     updated_at TIMESTAMPTZ DEFAULT NOW()

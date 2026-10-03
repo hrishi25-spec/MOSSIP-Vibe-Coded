@@ -135,10 +135,44 @@ validateChallenge(sessionId, frames)
 
 ### 3.1 Passive Liveness (Stage 1)
 
-- **Temporal median voting**: scores from the last `passiveWindowFrames` frames are collected; the median is compared to the threshold.
-- **Median** (not mean) is used to reject outliers (e.g., a single bad frame due to motion blur).
-- **Decision**: median ≥ threshold → proceed; median < threshold → escalate.
-- **PAD runs on every frame** alongside passive scoring — any PAD hit terminates the session immediately.
+Applies to both execution paths; the HTTP path (`DecisionEngineService`) and the
+engine library (`FaceLivenessEngine`) share `LivenessDecisionLogic`, so the rules
+below are identical for the running service and for desktop/Android embedding.
+
+- **Score source**: `PassiveScoringService` — the live-class probability of
+  **MiniFASNet-V2** (`onnx-minifasnet-v2`, bundled under `resources/models/`,
+  Apache-2.0, checksum-verified on load) when the model loads
+  (`mosip.liveness.backend: auto`), otherwise the OpenCV quality heuristic
+  (`heuristic` mode / graceful fallback). The active scorer id is reported by
+  the calibration endpoint.
+- **Cold start**: until `passiveMinFrames` (5) scored frames exist, the window
+  is *undecidable* — every response is the non-terminal `retry_passive`
+  ("Checking face liveness..."). Autofocus, exposure and pose settle during
+  the first second of a capture; a verdict on one or two frames is noise.
+- **Temporal median voting**: once warm, the **median** of the last
+  `passiveWindowFrames` (7) scores is compared to the threshold.
+  `LivenessDecisionLogic.decidePassiveWindow()` implements this, and the
+  calibration sweep evaluates that *same* function, so measured BPCER/APCER
+  describe deployed behaviour rather than a single-frame approximation.
+- **Median** (not mean) rejects outliers (motion blur, a blink, an exposure
+  shift) without a second model.
+- **Decision**: median ≥ threshold → proceed (session `PASSED`); median <
+  threshold → **automatic initiation of active liveness** (Stage 2), or a hard
+  fail when `activeLivenessEnabled=false`.
+- **PAD runs on every frame** alongside passive scoring — the FFT/texture/
+  brightness heuristics **OR** the MiniFASNet print/replay verdict. An attack is
+  terminal (no retry), but it must be **confirmed across `PAD_CONFIRM_FRAMES` (2)
+  consecutive frames**: a genuine screen replay is consistent, while a one-off
+  model flip (motion blur, exposure, a large/edge face crop) is not — this is
+  what caused device-specific false rejects on some cameras.
+- **Challenge lock**: the `PASSIVE → ACTIVE` transition is atomic with issuing
+  the challenge (pessimistic row lock on `liveness_sessions`,
+  `LivenessSessionRepository.findByIdForUpdate`). While a challenge is open,
+  frame submissions are answered with the *same* open challenge
+  (`escalate_to_active`, idempotent for the client): a late-arriving high-score
+  frame can neither pass the session without the action being performed nor
+  issue a duplicate challenge. Final verdicts are written only from the
+  passive stage (while unlocked) or from challenge validation.
 
 ### 3.2 Active Liveness (Stage 2)
 

@@ -3,11 +3,14 @@ Development updates
 
 Main Objective Branch
 
-Train
-Camera
+Train ✓
+Camera ✓
 Ui fix
 Animation 
 Security check 
 Add research.mds
+
+Bonus Problems
+
 
 

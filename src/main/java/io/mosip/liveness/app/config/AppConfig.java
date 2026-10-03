@@ -40,33 +40,62 @@ public class AppConfig {
     @Value("${mosip.liveness.min-challenge-count:2}")
     private int minChallengeCount;
 
-    @Value("${mosip.liveness.challenge-timeout-ms:10000}")
+    @Value("${mosip.liveness.challenge-timeout-ms:15000}")
     private long challengeTimeoutMs;
 
     @Value("${mosip.liveness.max-retries:2}")
     private int maxRetries;
 
     private static volatile boolean openCvAvailable;
+    private static final Object OPEN_CV_LOCK = new Object();
+    private static boolean openCvAttempted;
 
     @PostConstruct
     void init() {
-        // Load the OpenCV native library bundled in the opencv jar.
-        //
-        // openpnp extracts the native binary into a per-JVM temp directory and
-        // deletes stale directories on startup; that extraction can transiently
-        // race with another JVM (or a leftover directory) and fail. A failure
-        // surfaces as an Error (UnsatisfiedLinkError / ExceptionInInitializerError),
-        // not an Exception, so catching Exception alone would abort application
-        // startup. Degrade instead, and report the state through /health.
-        try {
-            nu.pattern.OpenCV.loadLocally();
-            openCvAvailable = true;
-            log.info("OpenCV native library loaded successfully");
-        } catch (Throwable t) {
-            openCvAvailable = false;
-            log.warn("OpenCV native library could not be loaded; frame-processing "
-                    + "endpoints will return 503 until it is available", t);
+        ensureOpenCvLoaded();
+    }
+
+    /**
+     * Loads the OpenCV native library <b>exactly once per JVM</b>, no matter
+     * which bean asks first.
+     *
+     * <p>Bean instantiation order is not guaranteed, so a bean created before
+     * this configuration class (e.g. {@code PassiveScoringService}, which
+     * builds a Haar cascade while initializing the liveness model) would
+     * otherwise hit an {@code UnsatisfiedLinkError} on
+     * {@code CascadeClassifier_1(String)} and silently degrade. Asking here
+     * makes the load idempotent: the first caller performs it, everyone else
+     * gets the flag.</p>
+     *
+     * <p>openpnp extracts the native binary into a per-JVM temp directory and
+     * deletes stale directories on startup; that extraction can transiently
+     * race with another JVM (or a leftover directory) and fail. A failure
+     * surfaces as an Error (UnsatisfiedLinkError / ExceptionInInitializerError),
+     * not an Exception, so catching Exception alone would abort application
+     * startup. Degrade instead, and report the state through /health.</p>
+     *
+     * @return true when frame processing is usable
+     */
+    public static boolean ensureOpenCvLoaded() {
+        if (openCvAttempted) {
+            return openCvAvailable;
         }
+        synchronized (OPEN_CV_LOCK) {
+            if (openCvAttempted) {
+                return openCvAvailable;
+            }
+            try {
+                nu.pattern.OpenCV.loadLocally();
+                openCvAvailable = true;
+                log.info("OpenCV native library loaded successfully");
+            } catch (Throwable t) {
+                openCvAvailable = false;
+                log.warn("OpenCV native library could not be loaded; frame-processing "
+                        + "endpoints will return 503 until it is available", t);
+            }
+            openCvAttempted = true;
+        }
+        return openCvAvailable;
     }
 
     /** True when the OpenCV native library loaded and frame processing is usable. */
