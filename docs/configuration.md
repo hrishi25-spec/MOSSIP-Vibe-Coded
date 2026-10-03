@@ -13,7 +13,7 @@ Built via `LivenessConfig.builder()`:
 | `passiveMinFrames` | int | `5` | Minimum consecutive frames before a passive liveness decision is made. |
 | `passiveWindowFrames` | int | `7` | Sliding window size for temporal median voting. Must be ≥ `passiveMinFrames`. |
 | `minChallengeCount` | int | `2` | Minimum number of distinct challenges that must pass before active liveness is satisfied. |
-| `challengeTimeoutMs` | long | `10,000` | Maximum time (ms) allowed to complete a single challenge. Exceeding this consumes one retry. |
+| `challengeTimeoutMs` | long | `15,000` | How long (ms) a challenge stays open for the user to perform the action. Lowered from 60,000 to 15,000 at the product's request; a 15s floor is applied at runtime. Exceeding the window consumes one retry. |
 | `maxRetries` | int | `2` | Number of retries (on top of the initial attempt) before hard failure. Total attempts = 1 + maxRetries. |
 | `supportedChallengeTypes` | Set\<ChallengeType\> | All 5 types | Pool of challenge types the engine may select from. |
 | `onRepeatedFailure` | RepeatedFailureAction | `LOCK_OUT` | Behavior when retry budget is exhausted: LOCK_OUT, FALLBACK, or ESCALATE_TO_OPERATOR. |
@@ -29,6 +29,79 @@ Built via `LivenessConfig.builder()`:
 - `maxRetries` ≥ 0
 - `challengeTimeoutMs` > 0
 - `supportedChallengeTypes` must not be empty (and if `activeLivenessEnabled`, must have ≥ 1 type)
+
+---
+
+## Choosing `passiveThreshold` — calibrate, don't guess
+
+A threshold number only means something relative to the **score distribution of
+the scorer that produced the scores**. Two things changed to make the number
+derivable instead of asserted:
+
+1. **The score is a liveness confidence.** With `mosip.liveness.backend: auto`
+   the passive score is MiniFASNet-V2's live-class probability (model
+   confidence), not the old image-quality heuristic. A threshold chosen against
+   the old scale does not transfer to the new scale — re-run the sweep after any
+   scorer change.
+2. **The decision is a median over 5 scored frames**, not a single frame, so
+   calibration must evaluate the same windowed decision (it does).
+
+### The sweep endpoint
+
+```
+GET /api/v1/eval/threshold-sweep?targetBpcer=0.02
+```
+
+Returns one row per threshold (0.05 … 0.95, step 0.05):
+
+| Field | Meaning |
+|-------|---------|
+| `bpcer` | fraction of bona-fide windows that would **escalate to an active challenge** at this threshold (user-experience cost) |
+| `apcer` | fraction of attack windows that would **pass passive** at this threshold (security cost); `null` when unmeasured |
+| `acer` | mean of the two; `null` when APCER is unmeasured |
+| `recommendedThreshold` | the operating point (see rule below) |
+| `recommendationBasis` / `note` | why, and what data was (not) available |
+
+**Inputs:** bona-fide windows are the first `passiveMinFrames` scores of every
+session that passed, taken from `frame_events` (real captures). Attack windows
+are recorded presentation-attack sessions when any exist; otherwise a clearly
+labelled **proxy corpus** (simulated print/screen degradations,
+`attackDataIsProxy: true`). With neither, `apcer` is `null` and the note says
+`APCER unmeasured` — never a fabricated zero.
+
+**Recommendation rule:** the *highest* threshold that keeps
+`BPCER ≤ targetBpcer` with `APCER = 0` (stricter is safer, so within the UX
+budget we take the strictest point); failing that, minimum `ACER`; failing
+that, no recommendation.
+
+### Applying the result
+
+```bash
+# read the table
+curl 'http://localhost:8000/api/v1/eval/threshold-sweep?targetBpcer=0.02'
+
+# apply the recommended value per workflow (DB row wins at runtime)
+curl -X PUT http://localhost:8000/api/v1/config/RESIDENT \
+     -H 'Content-Type: application/json' \
+     -d '{"passiveThreshold": 0.90}'
+```
+
+Defaults are unified on `0.80` across `LivenessConfig`, `application.yml`, the
+`config_policies` seed and the DB-miss fallback (V2 migration) — previously the
+seed said 0.75 while everything else said 0.80. `targetBpcer` is the knob for
+how much UX you spend: 0.02 means at most ~2% of genuine users are pushed into
+an active challenge.
+
+---
+
+## Service knobs (`application.yml`, `mosip.liveness.*`)
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `backend` | `auto` | `auto` = use the bundled MiniFASNet ONNX model when it loads, heuristic fallback otherwise; `heuristic` = force the OpenCV quality heuristic (model-less CI/debug). |
+| `model-path` | *(blank)* | Filesystem override for the model; blank uses the bundled `classpath:models/minifasnet_v2.onnx` (SHA-256 `d7b3cd9b…` verified on load). |
+| `passive-threshold` | `0.80` | Mirrors `LivenessConfig.DEFAULT_PASSIVE_THRESHOLD`; the `config_policies` DB row wins at runtime. |
+| `min-face-quality`, `passive-min-frames`, `passive-window-frames`, `min-challenge-count`, `challenge-timeout-ms`, `max-retries` | see yml | Engine defaults for the embedded (library) path. |
 
 ---
 

@@ -37,12 +37,18 @@ The service is designed to run **entirely offline** (no mandatory cloud calls) o
 │   │   ├── config/                         # Configuration and policy merging
 │   │   ├── audit/                          # Structured audit logging + metrics
 │   │   ├── device/                         # Device adapter layer (frame sources)
-│   │   └── eval/                           # ISO 30107 attack-scenario harness
+│   │   ├── eval/                           # ISO 30107 attack-scenario harness
+│   │   ├── client/                         # Desktop / Android integration adapters
+│   │   └── models/                         # JPA entities, DB/API enums, JSON converters
 │   ├── main/resources/
 │   │   ├── application.yml                 # Main Spring config (PostgreSQL)
 │   │   ├── application-dev.yml             # Dev profile (H2 in-memory DB)
+│   │   ├── haarcascade_eye.xml             # Vendored OpenCV cascades (not shipped by
+│   │   ├── haarcascade_frontalface_default.xml  # the Java bindings — without them no
+│   │   │                                   #   frame can ever detect a face)
+│   │   ├── static/index.html               # Browser test console (selfie-mirrored)
 │   │   └── db/migration/V1__init_schema.sql  # Flyway DB migration
-│   └── test/java/io/mosip/liveness/       # 20 test classes
+│   └── test/java/io/mosip/liveness/       # 23 test classes + 3 support files (26 files)
 │
 ├── pad_liveness_backend/                   # Python FastAPI ORIGINAL reference backend
 │   ├── app/                                # FastAPI application (35 .py files)
@@ -61,6 +67,8 @@ The service is designed to run **entirely offline** (no mandatory cloud calls) o
 ├── Dockerfile                              # Java container (Eclipse Temurin 17)
 ├── docker-compose.yml                      # Java service stack (PostgreSQL + API)
 ├── .env.example                            # Environment variable template
+├── start.sh / start.bat                    # Cross-platform one-command launchers
+├── mvnw / mvnw.cmd / .mvn/                 # Maven wrapper (no local Maven required)
 └── brain.md                                # ← YOU ARE HERE
 ```
 
@@ -70,10 +78,12 @@ The service is designed to run **entirely offline** (no mandatory cloud calls) o
 
 | Language | Where | Lines of Code | Purpose |
 |----------|-------|---------------|---------|
-| **Java 17** | `src/` | ~9,900 | Main backend: engine, API, device adapters, backends, tests |
+| **Java 17** | `src/main/java` (101 files) | ~9,300 | Main backend: engine, API, device adapters, backends, services, models |
+| **Java 17** | `src/test/java` (26 files) | ~2,400 | Unit + integration tests and test utilities |
 | **Python 3.11+** | `pad_liveness_backend/` | ~1,390 | Original FastAPI reference implementation (kept for comparison) |
-| **SQL** | `V1__init_schema.sql` | ~60 | PostgreSQL schema (Flyway migration) |
-| **YAML** | `application.yml`, `application-dev.yml` | ~50 | Spring Boot configuration |
+| **SQL** | `V1__init_schema.sql` | ~85 | PostgreSQL schema (Flyway migration) |
+| **YAML** | `application.yml`, `application-dev.yml` | ~60 | Spring Boot configuration |
+| **JavaScript/HTML** | `static/index.html` | ~450 | Single-page browser test console |
 | **Dockerfile** | 2 files | ~20 | Containerization (Java + Python) |
 
 ---
@@ -136,8 +146,14 @@ Base URL: `http://localhost:8000`
 ### Health Check
 ```
 GET /health
-→ { "status": "ok", "service": "MOSIP Face Liveness & PAD Service" }
+→ { "status": "ok",
+    "service": "MOSIP Face Liveness & PAD Service",
+    "engine": "available" | "unavailable" }
 ```
+
+`engine` reports whether the OpenCV native library loaded. When it is `unavailable`
+the service still starts and serves `/health` and `/api/v1/config`, but every
+frame/challenge endpoint that needs image processing returns **503**.
 
 ### Session Lifecycle
 ```
@@ -167,13 +183,32 @@ POST /api/v1/sessions/{sessionId}/frames
 
 **Frame submission flow:**
 1. Decodes base64 → OpenCV Mat
-2. Runs face detection (Haar cascade)
-3. Runs PAD check (frequency analysis + texture variance + brightness)
-4. If no face / multiple faces → retry
-5. If PAD attack detected → reject (terminal, session FAILED)
-6. Compute passive liveness score
-7. Score ≥ threshold → `proceed` (session PASSED)
-8. Score < threshold → `escalate_to_active` + return a challenge
+2. **Challenge lock**: if the session stage is `ACTIVE`, re-serve the open
+   challenge (`escalate_to_active`, idempotent) — no scoring, no pass, no
+   duplicate challenge (pessimistic row lock on `liveness_sessions`)
+3. Runs face detection (Haar cascade)
+4. Runs PAD check = FFT/texture/brightness heuristics **OR** MiniFASNet
+   print/replay verdict — an attack is terminal, but only once it is confirmed on
+   `PAD_CONFIRM_FRAMES` (2) consecutive frames (a real replay is consistent; a
+   single noisy frame must not fail an honest session)
+5. If no face / multiple faces → retry
+6. Computes the passive score for this frame — MiniFASNet live-class
+   probability when the model is loaded, the OpenCV quality heuristic otherwise
+   (`PassiveScoringService`, mode from `mosip.liveness.backend`)
+7. Reads the session's scored frames and runs the **median-window decision**
+   (`LivenessDecisionLogic.decidePassiveWindow`): until `passiveMinFrames` (5)
+   scores exist the window is not decidable → `retry_passive`
+   ("Checking face liveness...")
+8. Once warm: median of the last `passiveWindowFrames` (7) scores ≥
+   `passiveThreshold` → `proceed` (session PASSED); below → `escalate_to_active`
+   + issue a challenge (or `reject` when active liveness is disabled)
+
+> **Median over a window, not a single frame.** The HTTP path decides on the
+> median of the last `passiveWindowFrames` scores, and only once at least
+> `passiveMinFrames` scores exist (the same rule the embedded engine applies;
+> both share `LivenessDecisionLogic`). One blurry frame can no longer escalate
+> a session and one lucky frame can no longer pass it. Frame events persist
+> every score, which is also the bona-fide dataset for calibration below.
 
 ### Challenge Validation
 ```
@@ -182,7 +217,7 @@ POST /api/v1/sessions/{sessionId}/challenges/validate
   → ChallengeValidationResult {
       sessionId, challenge: { id, challengeType, status, ... },
       passed: true/false,
-      action: "proceed" | "retry_challenge" | "reject",
+      action: "proceed" | "continue" | "retry_challenge" | "reject",
       message: "generic user-facing message"
     }
 ```
@@ -190,10 +225,21 @@ POST /api/v1/sessions/{sessionId}/challenges/validate
 **Challenge validation flow:**
 1. Re-run PAD on all challenge frames (attack = immediate reject)
 2. Evaluate the specific challenge type across the frame sequence
-3. If passed + enough challenges completed → `proceed` (PASSED)
-4. If passed + more challenges needed → `retry_challenge`
-5. If failed → retry with different challenge (up to maxRetries)
+3. If passed → resolve immediately:
+   - enough challenges completed → `proceed` (PASSED)
+   - more challenges needed → `retry_challenge` (a new challenge is issued)
+4. If **not yet** passed and the window is still open → `continue` — the *same*
+   challenge stays `ISSUED`, the session stays `ACTIVE`, and **no retry is consumed**
+5. If the window elapsed without a pass → retry with a different challenge
+   (up to `maxRetryCount`)
 6. If retries exhausted → `reject`
+
+**Challenge window.** A challenge stays open for `challengeTimeoutMs`, with a
+**15-second floor** enforced by the engine regardless of the stored value
+(shortened from 60s at the product's request). A client
+should keep polling `/challenges/validate` with the same `challengeId` while the
+response is `continue`, and stop the moment it changes — `static/index.html` is a
+reference implementation of exactly that loop.
 
 ### Configuration
 ```
@@ -212,24 +258,37 @@ PUT /api/v1/config/{workflowType}
 | Field | Type | Range | Default |
 |-------|------|-------|---------|
 | livenessEnabled | boolean | — | true |
-| passiveThreshold | double | 0.0–1.0 | 0.75 |
+| passiveThreshold | double | 0.0–1.0 | 0.80 (single source of truth — `LivenessConfig.DEFAULT_PASSIVE_THRESHOLD`, mirrored by the V1/V2 seed, `application.yml` and the DB-miss fallback; calibrate via the sweep endpoint below) |
 | activeLivenessEnabled | boolean | — | true |
-| minChallengeCount | int | 1–5 | 1 |
-| challengeTypes | string[] | — | ["blink","smile","turn_left","turn_right"] |
-| challengeTimeoutMs | int | 1000–60000 | 8000 |
-| maxRetryCount | int | 0–10 | 3 |
-| onRepeatedFailure | string | LOCK\|ESCALATE\|ALLOW_RETRY | LOCK |
-
-### Metrics
+| minChallengeCount | int | ≥ 1 | 1 |
+| challengeTypes | string[] | non-empty | ["blink","smile","turn_left","turn_right"] |
+| challengeTimeoutMs | int | ≥ 1000 (15 000 floor applied at runtime) | 15000 |
+| maxRetryCount | int | ≥ 0 | 3 |
+| onRepeatedFailure | string | LOCK\|ESCALATE\|ALLOW_RETRY | LOCK |### Metrics
 ```
 GET /api/v1/metrics
-  → OperationalMetrics {
-      totalSessions, passedSessions, failedSessions, activeSessions,
-      passRate, avgPassiveToActiveEscalationRate,
-      avgFramesPerSession, avgChallengesPerSession,
-      livenessRetryRate, livenessFailureRate, padRejectionRate
+  → OperationalMetrics { totalSessions, passedSessions, failedSessions, activeSessions, passRate, avgPassiveToActiveEscalationRate,
+      avgFramesPerSession, avgChallengesPerSession, livenessRetryRate, livenessFailureRate, padRejectionRate }
+```
+
+### Threshold Calibration
+```
+GET /api/v1/eval/threshold-sweep?targetBpcer=0.02
+  → ThresholdSweep.Result {
+      targetBpcer, minFrames, windowFrames, scorer, attackDataIsProxy, excludedWindows,
+      recommendedThreshold,        // omitted (null) when nothing is recommended
+      recommendationBasis, note,
+      rows: [ { threshold, bonaFideWindows, bonaFidePassed, bpcer,
+                attackWindows, apcer, acer } ]     // 0.05..0.95 step 0.05
     }
 ```
+
+Sweeps the passive threshold over the **same median-window decision the live
+path uses**, evaluated on bona-fide score windows from `frame_events` (real
+captures) plus attack windows (recorded presentation-attack sessions when any
+exist, else the labelled `ProxyPresentationCorpus`). APCER is reported as
+`null` (never a fabricated zero) when no attack data exists. See
+`docs/configuration.md` for how to read and apply the result.
 
 ### Audit Trail
 ```
@@ -237,7 +296,15 @@ GET /api/v1/sessions/{sessionId}/audit
   → [ { id, eventType, details: {key: value, ...}, createdAt }, ... ]
 ```
 
-**Audit event types:** `SESSION_STARTED`, `SESSION_CLOSED`, `SESSION_ABORTED`, `FRAME_REJECTED`, `FRAME_SCORED`, `PASSIVE_PASSED`, `LIVENESS_FAILED`, `ESCALATED_TO_ACTIVE`, `CHALLENGE_ISSUED`, `CHALLENGE_PASSED`, `CHALLENGE_FAILED`, `CHALLENGE_TIMEOUT`, `MAX_RETRIES_EXCEEDED`, `REPEATED_FAILURE_ACTION`, `PAD_BLOCKED`, `INTERNAL_ERROR`
+**Audit event types written by the HTTP API** (free-form strings stored in
+`audit_logs.event_type`, and what this endpoint actually returns):
+`PAD_REJECTED`, `SESSION_PASSED`, `CHALLENGE_ISSUED`, `CHALLENGE_PASSED`, `CHALLENGE_FAILED`.
+
+**Additional `AuditEventType` enum values** (`audit/AuditEventType.java`) emitted by the
+standalone engine's structured logger — *not* by the HTTP API:
+`SESSION_STARTED`, `SESSION_CLOSED`, `SESSION_ABORTED`, `FRAME_REJECTED`, `FRAME_SCORED`,
+`PASSIVE_PASSED`, `LIVENESS_FAILED`, `ESCALATED_TO_ACTIVE`, `CHALLENGE_TIMEOUT`,
+`MAX_RETRIES_EXCEEDED`, `REPEATED_FAILURE_ACTION`, `PAD_BLOCKED`, `INTERNAL_ERROR`.
 
 ### Error Response Format
 All errors return:
@@ -253,6 +320,19 @@ All errors return:
 ---
 
 ## 6. How the Engine Works Internally
+
+> **Two execution paths share the domain types below.** Where they differ, this
+> document says which one it means.
+>
+> 1. **HTTP service** — `api/` → `services/DecisionEngineService` → `LivenessEngineService`
+>    / `PadEngineService`. This is what actually runs on port 8000. Sessions, frames,
+>    challenges and audit rows are persisted in the database, each frame is scored
+>    **individually**, and challenges are `challenges` table rows.
+> 2. **Embedded engine library** — `engine/FaceLivenessEngine` behind `engine/LivenessPipeline`.
+>    A standalone, in-memory state machine with temporal **median voting**, frame
+>    sampling, combined passive/active scoring and a `client/` adapter layer, embedded
+>    by Desktop/Android registration clients. It is exercised by the engine tests and
+>    the attack-scenario harness.
 
 ### 6.1 The Core Pipeline (Passive → Active → PAD)
 
@@ -282,6 +362,38 @@ All errors return:
 6. **Temporal median voting**: Collects `passiveMinFrames` (5) scores in a sliding window of `passiveWindowFrames` (7). Computes **median** (not mean — rejects outliers).
 7. **Decision**: Median ≥ `passiveThreshold` (0.80) → PASS. Below → escalate to active (or fail if active disabled).
 
+**HTTP-path passive score** (what the running service computes for one frame):
+
+```
+score = PassiveScoringService.score(frame, observation, imageUtils)
+        ├─ mosip.liveness.backend = auto (default): MiniFASNet-V2 live-class
+        │   probability via OnnxMiniFasNetBackend (checksum-verified model),
+        │   falling back to the heuristic below if the model cannot analyse
+        │   the frame (or fails to load)
+        └─ mosip.liveness.backend = heuristic: quality formula
+            faceQuality = 0.5 × sharpness + 0.5 × brightness
+            sharpness   = min(1, LaplacianVariance / 500)
+            brightness  = 1 − |meanGray − 128| / 128
+            eyeSymmetry = 1.0 if ≥ 2 eyes found in the face ROI, else 0.4
+            score       = 0.4 × faceQuality + 0.4 × eyeSymmetry + 0.2 × sharpness
+```
+
+Frame scores accumulate in `frame_events`; the **median of the last
+`passiveWindowFrames`** (once ≥ `passiveMinFrames` exist) is compared against
+`passiveThreshold` — the same `LivenessDecisionLogic.decidePassiveWindow` rule
+the engine-library path and the calibration sweep use.
+
+> The old heuristic is kept only as an explicit fallback: its 0.4·eyeSymmetry
+> term capped the score at **0.76 whenever fewer than 2 eyes were detected**,
+> so at the old 0.80 default such a session could never pass passive — eye-
+> cascade flakiness, not liveness, drove the escalation rate. Calibrate the
+> threshold against the scorer actually in use (`GET /api/v1/eval/threshold-sweep`).
+
+> Every score, threshold and formula in the project — including the PAD heuristics
+> and each backend's passive-scoring maths — is catalogued in the separate reference
+> document *MOSIP Liveness — Scores, Thresholds & Passing Criteria*, which is
+> deliberately **not** part of this file.
+
 ### 6.3 Active Challenge Stage
 
 1. **Challenge selection**: `ChallengeSelector` uses a shuffled-bag algorithm with `SecureRandom`. Every challenge type appears once before repeating. No back-to-back repeats while alternatives remain.
@@ -296,7 +408,26 @@ All errors return:
    - `ACTION_DETECTED` → UI shows "Action detected"
    - `HOLD_STILL` → UI shows "Hold still"
 5. **Passive re-evaluation during active** (v3): During challenges, each frame is also scored by the passive liveness scorer. If the passive median drops below `passiveThresholdActive`, the session fails — catches presentation attacks that can simulate the challenge action.
-6. **Combined scoring** (v3): Weighted blend of passive (60%) + active (40%) components.
+6. **Combined scoring** (v3): Weighted blend of passive (60%) + active (40%) components:
+   `combined = 0.6 × passiveScore + 0.4 × activeComponent`.
+
+**HTTP-path challenge evaluation** (engine library aside, the running service has no
+landmarks — it uses OpenCV bounding-box heuristics over the submitted burst):
+
+| Challenge | Passes when |
+|-----------|-------------|
+| `TURN_LEFT` | peak horizontal face-box excursion from the baseline frame > `max(12px, 20% of face width)`, toward **larger x** |
+| `TURN_RIGHT` | same measure, toward **smaller x** |
+| `LOOK_LEFT` / `LOOK_RIGHT` | peak excursion > `max(8px, 12% of face width)`, same polarity |
+| `LOOK_DIRECTION` | `abs(peak excursion)` > the gaze threshold |
+| `LOOK_UP` / `LOOK_DOWN` | never — fails closed, because vertical gaze is not recoverable from horizontal box movement |
+| `BLINK` | an eye-detection dropout in the face ROI followed by eyes detected again |
+| `SMILE` | mouth-ROI Laplacian variance range across the burst > 50 |
+
+Frames in which no face is detected are **skipped** rather than failing the burst
+(at least 2 face-bearing frames are required), so losing Haar tracking mid-turn does
+not reject a genuine turn. The excursion is measured against the first usable frame,
+so a turn that returns to centre still counts.
 
 ### 6.4 Session Lifecycle
 
@@ -321,25 +452,37 @@ closeSession()
 
 **Session timeout**: `maxSessionDurationMs` (30s default). Checked on every frame, even skipped ones.
 
+> This state machine is the **embedded engine library**. In the HTTP path a session is
+> simply a `liveness_sessions` row whose `status` moves `ACTIVE` → `PASSED` | `FAILED`
+> | `EXPIRED`, driven by `SessionsController` and `DecisionEngineService`; there is no
+> `maxSessionDurationMs` enforcement on that path.
+
 ### 6.5 Error Codes
 
 | Code | Constant | User Message | Retryable? |
 |------|----------|-------------|------------|
-| E101 | DEVICE_UNAVAILABLE | "Biometric device is unavailable." | No |
-| E102 | DEVICE_CONNECTION_FAILURE | "Could not connect to the biometric device." | No |
+| E101 | DEVICE_UNAVAILABLE | "Biometric device is unavailable." | Yes |
+| E102 | DEVICE_CONNECTION_FAILURE | "Could not connect to the biometric device." | Yes |
+| E103 | CAMERA_UNAVAILABLE | "Camera is unavailable." | Yes |
 | E201 | FACE_NOT_DETECTED | "No face detected. Please look at the camera." | Yes |
 | E202 | MULTIPLE_FACES_DETECTED | "Multiple faces detected..." | Yes |
 | E203 | POOR_FACE_QUALITY | "Face is not clear..." | Yes |
-| E301 | LIVENESS_SCORE_BELOW_THRESHOLD | "Liveness check incomplete..." | No |
+| E301 | LIVENESS_SCORE_BELOW_THRESHOLD | "Liveness check incomplete..." | Yes |
 | E401 | PAD_FAILURE | "Face verification could not be completed..." | **No (terminal)** |
 | E501 | ACTIVE_CHALLENGE_FAILURE | "Verification action was not completed..." | Yes |
 | E502 | CHALLENGE_TIMEOUT | "Verification timed out..." | Yes |
-| E503 | MAX_RETRIES_EXCEEDED | "Verification could not be completed..." | No |
-| E504 | SESSION_TIMEOUT | "Face verification timed out..." | No |
-| E505 | MODEL_INTEGRITY | "Model integrity check failed." | No |
-| E506 | ACTIVE_REEVAL_FAILED | "Liveness score dropped during active challenge..." | No |
-| E601 | INVALID_FRAME_DATA | "Invalid capture data received." | No |
-| E901 | ENGINE_INTERNAL_ERROR | "An internal error occurred." | No |
+| E503 | MAX_RETRIES_EXCEEDED | "Verification could not be completed..." | **No** |
+| E504 | SESSION_TIMEOUT | "Face verification timed out..." | Yes |
+| E505 | MODEL_INTEGRITY | "Model integrity check failed." | Yes |
+| E506 | ACTIVE_REEVAL_FAILED | "Liveness score dropped during active challenge..." | Yes |
+| E601 | INVALID_FRAME_DATA | "Invalid capture data received." | Yes |
+| E602 | INVALID_SESSION | "Unknown or closed session." | Yes |
+| E603 | INVALID_STATE | "Operation not allowed in the current state." | Yes |
+| E604 | CONFIGURATION_INVALID | "Liveness configuration is invalid." | Yes |
+| E901 | ENGINE_INTERNAL_ERROR | "An internal error occurred." | Yes |
+
+"Retryable?" reflects `LivenessErrorCode.isRetryableByUser()`, which is `true` for
+every code except `PAD_FAILURE` (E401) and `MAX_RETRIES_EXCEEDED` (E503).
 
 ---
 
@@ -365,7 +508,8 @@ public interface LivenessBackend {
 | Backend | Class | Model | What It Does | When to Use |
 |---------|-------|-------|-------------|-------------|
 | **Mock** | `MockLivenessBackend` | None | Scriptable test double. `Subject` simulates face, blink, smile, head turn, PAD verdicts. | Unit tests, CI, attack-scenario harness |
-| **TFLite MiniFASNet** | `TfLiteMiniFasNetBackend` | `minifasnet.tflite` (~1.5MB) | Real PAD: classifies live vs print/screen-replay. Uses OpenCV Haar cascades for face/eye detection. | Real PAD when TFLite is on classpath |
+| **TFLite MiniFASNet** | `TfLiteMiniFasNetBackend` | `minifasnet.tflite` (~1.5MB) | Real PAD: classifies live vs print/screen-replay. Uses OpenCV Haar cascades for face/eye detection. | Android/embedded builds only — the TFLite AAR has no desktop-JVM interpreter, so this backend cannot run here |
+| **ONNX MiniFASNet-V2** | `OnnxMiniFasNetBackend` | `minifasnet_v2.onnx` (~1.7MB) | Real passive liveness + PAD via ONNX Runtime; **live = index 1** (index 0/2 = print/replay). 80×80 BGR crop (2.7× margin), **raw 0–255** pixels → softmax. | **Default scorer** in the HTTP path (`mosip.liveness.backend: auto`) |
 | **MediaPipe FaceMesh** | `MediaPipeFaceMeshBackend` | `face_mesh.tflite` (~5MB) | 468-point 3D facial landmark extraction. Precise EAR, smile, head pose (solvePnP + Rodrigues), iris-based gaze. Temporal liveness scoring via rolling buffer. | High-fidelity active challenge evaluation |
 
 ### 7.3 Key Backend Details
@@ -379,6 +523,16 @@ public interface LivenessBackend {
 - Loads TFLite via reflection (no compile-time TFLite dependency)
 - OpenCV face detection via Haar cascade → crop → resize to 80×80 → TFLite inference
 - Options: `modelPath`, `inputSize`, `threads`, `delegate` (cpu/nnapi/gpu), `faceCascadePath`, `eyeCascadePath`
+- **Desktop-JVM caveat:** the TFLite runtime ships as an Android-only AAR with no `org.tensorflow.lite.Interpreter`, so on desktop this backend silently falls back to the quality heuristic. Use the ONNX backend instead.
+
+**OnnxMiniFasNetBackend:**
+- `com.microsoft.onnxruntime:onnxruntime` (desktop-native, bundled runtime), no reflection
+- Bundled model `classpath:models/minifasnet_v2.onnx`, SHA-256 `d7b3cd9b…` verified on load (skipped only for a custom `modelPath` unless `expectedSha256` is supplied)
+- Input is **raw 0–255 BGR** (upstream `ToTensor` has `.div(255)` commented out — the ONNX model card's `/255` claim is wrong). The live class is **index 1** (`label == 1 ? "Real" : "Fake"` in every reference implementation); the card's `[live, print, replay]` order is also wrong. Feeding `/255` and reading index 0 made every genuine face score ≈0.0004 and always fall back to the heuristic.
+- Face detection params mirror `ImageUtils.detectFaces` (scale 1.1, neighbors 5, min 60×60)
+- Face crop is a 2.7× margin around the face centre **clamped to the frame** (reference `scale = min((h-1)/box_h, (w-1)/box_w, 2.7)`). Black-padding an oversized crop added borders the model read as a presented image, which surfaced as device-specific `SCREEN_REPLAY` false positives on some cameras (e.g. a Mac webcam)
+- Leaves action landmarks `null` (a classifier, not a mesh) — active challenges stay with the heuristic/MediaPipe path
+- Options: `modelPath`, `modelResource`, `expectedSha256`
 
 **MediaPipeFaceMeshBackend:**
 - OpenCV face detection → crop + pad (30% expansion) → resize to 192×192 → FaceMesh TFLite inference
@@ -470,7 +624,7 @@ Record with all fields fully resolved (base + override merged). Passed to each `
 | `DEFAULT_PASSIVE_MIN_FRAMES` | 5 | Min frames before passive decision |
 | `DEFAULT_PASSIVE_WINDOW_FRAMES` | 7 | Sliding window size |
 | `DEFAULT_MIN_CHALLENGE_COUNT` | 2 | Challenges required to pass |
-| `DEFAULT_CHALLENGE_TIMEOUT_MS` | 10,000 | Per-challenge timeout |
+| `DEFAULT_CHALLENGE_TIMEOUT_MS` | 15,000 | Per-challenge window (15s floor) |
 | `DEFAULT_MAX_RETRIES` | 2 | Retries before hard fail |
 | `DEFAULT_MAX_SESSION_DURATION_MS` | 30,000 | Total session timeout |
 | `DEFAULT_FRAME_SAMPLING_RATE` | 1 | Process every frame (production: 2) |
@@ -495,13 +649,24 @@ challenges            -- id(UUID), session_id(FK), challenge_type, status, attem
                        -- timeout_ms, issued_at, completed_at
 
 config_policies       -- id(UUID), workflow_type(UNIQUE), liveness_enabled, passive_threshold,
-                       -- active_liveness_enabled, min_challenge_count, challenge_types(JSONB),
+                       -- active_liveness_enabled, min_challenge_count, challenge_types(TEXT),
                        -- challenge_timeout_ms, max_retry_count, on_repeated_failure
 
-audit_logs            -- id(UUID), session_id(FK), event_type, details(JSONB), created_at
+audit_logs            -- id(UUID), session_id(FK), event_type, details(TEXT), created_at
 ```
 
-Seed data: default policies for RESIDENT, OPERATOR, SUPERVISOR workflows.
+Seed data: default policies for RESIDENT, OPERATOR, SUPERVISOR workflows (explicit
+literal UUIDs — no `uuid-ossp` extension is required, because Hibernate generates the
+identifier client-side with `@GeneratedValue(strategy = GenerationType.UUID)`).
+
+`challenge_types` and `details` are stored as **JSON text**, not `JSONB`: the entities
+map them with explicit JPA `AttributeConverter`s (`models/converter/`) so H2 (dev) and
+PostgreSQL behave identically, and neither column is ever queried with JSON operators.
+The `config_policies` passive-threshold default was unified to `0.80` by
+`V2__unify_passive_threshold.sql` (which also rewrites any seeded `0.75` rows), so the
+DB now matches `LivenessConfig` / `application.yml`. The remaining row defaults
+(`min_challenge_count 1`, `max_retry_count 3`) still differ from the engine's
+`2 / 2` — see §16.
 
 ---
 
@@ -515,7 +680,19 @@ ts=2026-08-27T12:00:00Z event=FRAME_SCORED session=abc-123 workflow=RESIDENT_REG
 Never emits raw frames or model internals — only decisions and scores.
 
 ### `MetricsCollector`
-Thread-safe counters: `framesProcessed`, `totalProcessingMs`, `challengesCompleted`, `retries`, `escalations`, `padBlocks`, `sessionsFailed`. Produces `MetricsSnapshot` for monitoring dashboards.
+Thread-safe counters maintained **inside the embedded engine**: `framesProcessed`,
+`totalProcessingMs`, `challengesCompleted`, `totalChallengeMs`, `retries`,
+`sessionsEnded`, `sessionsFailed`, `escalations`, `padBlocks`. `snapshot()` derives
+`avgProcessingMs`, `avgChallengeMs`, retry rate, failure rate and escalation rate —
+rates are divided by `sessionsEnded` (1 minimum, to avoid divide-by-zero).
+
+> The HTTP `GET /api/v1/metrics` endpoint does **not** read this collector. It
+> aggregates from the database (`MetricsController`): `passRate = passed/total`,
+> `livenessFailureRate = failed/total`, `avgFramesPerSession`, `avgChallengesPerSession`,
+> `livenessRetryRate = ΣretryCount / total`, `padRejectionRate = sessions whose
+> failure_reason starts with 'presentation_attack:' / total`, and
+> `avgPassiveToActiveEscalationRate = distinct sessions with an ACTIVE-stage frame / total`.
+> Each ratio is rounded to 4 decimal places.
 
 ### `AttackScenarioHarness`
 Automated evaluation framework for ISO/IEC 30107-3 style testing:
@@ -548,12 +725,12 @@ The Java version is a **complete superset** of the Python version — it adds th
 
 ## 14. Test Suite
 
-**20 test classes** covering:
+**23 test classes + 3 support files (26 files), 152 tests, all green.**
 
 | Test | What It Validates |
 |------|-------------------|
 | `EngineFlowTest` | Full passive→pass workflow |
-| `EngineEscalationTest` | Passive→active escalation, multi-challenge flow, retry exhaustion |
+| `EngineEscalationTest` | Passive→active escalation, multi-challenge flow, retry exhaustion, challenge timeout |
 | `PadBlockingTest` | PAD attack detection blocks session immediately |
 | `ErrorConditionsTest` | No face, multiple faces, bad quality, invalid state |
 | `LivenessDecisionLogicTest` | Median calculation, threshold decisions |
@@ -561,16 +738,23 @@ The Java version is a **complete superset** of the Python version — it adds th
 | `ChallengeSelectorTest` | No back-to-back repeats, shuffled bag, parameters |
 | `AttackScenarioHarnessTest` | 240 presentations, APCER/BPCER/ACER computation |
 | `ConfigOverrideTest` | Per-workflow policy merging |
+| `EntityPersistenceTest` | JPA entities + JSON attribute converters round-trip on H2 |
+| `ConfigServiceTest` | DB ↔ engine policy/enum conversion, 60s sentinel resolution, round-trips |
+| `DecisionEngineServiceTest` | Challenge keep-open window, retry accounting, immediate PAD rejection |
+| `LivenessEngineServiceTest` | Turn/gaze polarity, width-scaled thresholds, face-dropout tolerance |
+| `ImageUtilsCascadeTest` | The vendored Haar cascades are present and loadable |
 | `SessionsControllerTest` | Session CRUD endpoints |
 | `FramesControllerTest` | Frame submission + decision flow |
+| `ChallengesControllerTest` | Challenge validation endpoint, `challenge_id` validation, retry semantics |
 | `ConfigControllerTest` | Config read/update |
 | `MetricsControllerTest` | Metrics aggregation |
 | `AuditControllerTest` | Audit trail retrieval |
+| `HealthControllerTest` | Health check incl. the `engine` flag |
 | `GlobalExceptionHandlerTest` | Error response formatting |
-| `HealthControllerTest` | Health check |
 | `DeviceAdapterTest` | All device adapter components |
 
-Supporting test infrastructure: `MutableClock` (deterministic time), `RecordingAuditLogger` (capture audit events), `TestConfig` (test Spring context).
+Supporting infrastructure: `MutableClock` (deterministic time), `RecordingAuditLogger`
+(captures audit events), `TestConfig` (`@TestConfiguration` with mocked repositories).
 
 ---
 
@@ -597,8 +781,24 @@ CMD ["java", "-jar", "app.jar"]
 cp .env.example .env    # Set POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
 docker compose up --build
 # API: http://localhost:8000
-# Swagger UI: http://localhost:8000/swagger-ui.html
+# Swagger UI: http://localhost:8000/swagger-ui/index.html
 ```
+
+### Running locally without Docker (cross-platform)
+
+```bash
+./start.sh          # macOS / Linux
+start.bat           # Windows
+```
+
+The launchers build the jar with the bundled Maven wrapper (`./mvnw`, so no local
+Maven install is needed) and run it on the **`dev` profile** (in-memory H2, Flyway
+disabled, schema generated by Hibernate) with the browser console opened at
+`http://localhost:8000`. Options: `--no-build`, `--rebuild`, `--test`, `--port N`,
+`--profile NAME`, `--no-browser`, `--help`.
+
+Both launchers stop cleanly on Ctrl+C, and both refuse to start if the port is
+already in use.
 
 ---
 
@@ -624,20 +824,39 @@ docker compose up --build
 
 10. **Per-workflow policy overrides** — resident capture, operator auth, and supervisor auth can each have different thresholds, challenge counts, and retry policies.
 
+11. **Two configuration sources, one of which wins at runtime** — `application.yml`
+    (`mosip.liveness.*`, bound by `AppConfig` into the engine's `LivenessConfig`) versus the
+    `config_policies` table (read by `ConfigService` on every request). Sessions served by
+    the HTTP API use the **database** path; when no row exists for a workflow the
+    `ConfigService` fallback applies — and the fallback is now pinned to the
+    `LivenessConfig` constants rather than ad-hoc literals. The passive threshold is
+    reconciled: `V2__unify_passive_threshold.sql` sets the column default and existing
+    rows to `0.80`, matching `application.yml`, `LivenessConfig` and the fallback. The
+    remaining defaults still disagree (`min_challenge_count 1 / max_retry_count 3` in the
+    DB vs `2 / 2` in `LivenessConfig`); reconcile those before relying on either.
+
+12. **Timestamps are normalized, and the dialect is not pinned** — `spring.jpa.properties.hibernate`
+    deliberately does *not* set a dialect, so Hibernate derives it from the actual JDBC
+    connection. Pinning `PostgreSQLDialect` while the `dev` profile ran H2 made every
+    persisted `OffsetDateTime` read back shifted by the JVM's offset (a row written at
+    20:26:54Z read as 14:56:54Z on a +05:30 machine), which silently corrupted audit times
+    and challenge-window arithmetic.
+
 ---
 
 ## 17. File Inventory
 
-### Java Source (83 files, ~9,900 LOC)
+### Java Source (101 files, ~9,300 LOC)
 
 **Entry Point (1)**
 - `PadLivenessApplication.java`
 
-**API Layer — Controllers (8)**
+**API Layer — Controllers (9)**
 - `SessionsController.java` — POST/GET sessions, POST close
 - `FramesController.java` — POST frames
 - `ChallengesController.java` — POST validate
 - `ConfigController.java` — GET/PUT config
+- `CalibrationController.java` — GET threshold-sweep (BPCER/APCER table + recommendation)
 - `MetricsController.java` — GET metrics
 - `AuditController.java` — GET audit trail
 - `HealthController.java` — GET health
@@ -650,9 +869,11 @@ docker compose up --build
 - `ConfigPolicyUpdate`, `ConfigPolicyResponse`
 - `OperationalMetrics`, `AuditLogEntry`
 
-**Services (6)**
-- `DecisionEngineService` — orchestrates passive→active→accept/reject
-- `LivenessEngineService` — face observation, passive scoring, active challenge validation (OpenCV-based)
+**Services (8)**
+- `DecisionEngineService` — orchestrates passive→active→accept/reject (challenge lock, median-window decision)
+- `LivenessEngineService` — face observation, passive scoring (heuristic), active challenge validation (OpenCV-based)
+- `PassiveScoringService` — scorer façade: MiniFASNet ONNX model or heuristic fallback (`mosip.liveness.backend`)
+- `ThresholdCalibrationService` — assembles bona-fide windows from `frame_events` + proxy attack corpus, runs the sweep
 - `PadEngineService` — PAD via FFT + texture + brightness heuristics
 - `ChallengeSelectorService` — dynamic challenge selection with SecureRandom
 - `ConfigService` — bridges DB config with engine EffectivePolicy
@@ -678,9 +899,10 @@ docker compose up --build
 - `SessionSummary` — close-session audit record
 - `AssessmentStatus` — enum of frame assessment states
 
-**Backends (4)**
+**Backends (5)**
 - `LivenessBackend` — interface
 - `MockLivenessBackend` — scriptable test double
+- `OnnxMiniFasNetBackend` — real passive liveness + PAD via ONNX Runtime on the bundled `minifasnet_v2.onnx` (checksum-verified)
 - `TfLiteMiniFasNetBackend` — real PAD via TFLite + OpenCV
 - `MediaPipeFaceMeshBackend` — 468-point FaceMesh landmarks via TFLite + OpenCV
 
@@ -709,18 +931,35 @@ docker compose up --build
 - `PixelFormats` — buffer conversion utilities
 - `SyntheticScene` — deterministic scene renderer
 
-**Evaluation (4)**
-- `AttackScenarioHarness` — automated attack-scenario test runner
+**Evaluation (6)**
+- `AttackScenarioHarness` — automated attack-scenario test runner (accepts an injected `LivenessBackend` factory)
+- `ThresholdSweep` — BPCER/APCER/ACER table + recommended operating point
+- `ProxyPresentationCorpus` — labelled simulated print/screen degradations (proxy only)
 - `PadMetrics` — APCER/BPCER/ACER/FAR/FRR computation
 - `ScenarioReport` — aggregated evaluation report
 - `PresentationLabel` — BONA_FIDE/PRINTED_PHOTO/SCREEN_REPLAY/VIDEO_REPLAY
 
 **App Config (1)**
-- `AppConfig` — Spring @Configuration: bean wiring, OpenCV init, CORS
+- `AppConfig` — Spring @Configuration: bean wiring, OpenCV init (catches `Throwable`,
+  including `LinkageError`, and degrades instead of aborting startup), CORS
 
-### Java Tests (20 files)
-- 7 engine tests, 3 challenge tests, 1 config test, 7 API tests, 1 device test, 1 eval test
-- 2 test utilities (`MutableClock`, `RecordingAuditLogger`)
+**Client (5)** — integration surface for host applications
+- `LivenessClient` — platform-neutral client interface + result records
+- `LivenessHttpClient` — HTTP client for this service's REST API
+- `LivenessClientException` — client-side error type
+- `DesktopLivenessAdapter` — Desktop (JavaFX/Java) adapter
+- `AndroidLivenessAdapter` — Android (Flutter / Pigeon bridge) adapter
+
+**Models (13)** — API/DB layer, kept deliberately separate from `core/`
+- `entity/` — `LivenessSession`, `FrameEvent`, `ChallengeEntity`, `AuditLog`, `ConfigPolicy`
+- `enums/` — `WorkflowType`, `SessionStatus`, `LivenessStage`, `ChallengeStatus`,
+  `ChallengeType`, `FailurePolicy`
+- `converter/` — `StringListJsonConverter`, `StringObjectMapJsonConverter`
+  (JSON text ↔ Java collections, so H2 and PostgreSQL behave identically)
+
+### Java Tests (26 files, 152 tests)
+- 5 engine, 2 challenge, 1 config, 8 API, 1 device, 1 eval, 1 models, 4 service tests
+- Support files: `MutableClock`, `RecordingAuditLogger`, `TestConfig`
 
 ### Python Reference Backend (35 files, ~1,390 LOC)
 - FastAPI app with identical API contract
@@ -730,8 +969,10 @@ docker compose up --build
 ### SQL (1 file)
 - `V1__init_schema.sql` — 5 tables, indexes, seed data
 
-### Documentation (5 files)
-- `design.md`, `status-report.md`, `backend-swapping.md`, `configuration.md`, `README.md`
+### Documentation
+- `docs/design.md`, `docs/status-report.md`, `docs/backend-swapping.md`,
+  `docs/configuration.md`, `docs/client-integration-guide.md`
+- `README.md` (repo root) — quick start, cross-platform launchers, architecture summary
 
 ---
 
@@ -743,14 +984,20 @@ docker compose up --build
 3. Done — no engine/UI/config changes needed
 
 ### Add a New Challenge Type
-1. Add value to `ChallengeType` enum
-2. Add evaluator in `ChallengeEvaluators.evaluate()` and `evaluateFrame()`
-3. Add parameter generation in `ChallengeSelector.parametersFor()`
+1. Add the value to **both** `core.ChallengeType` and `models.enums.ChallengeType`
+   (they are separate families; `models` is the API/DB-facing one)
+2. Add it to `ConfigService.toCoreChallenge` **and** `ConfigService.toDbChallenge`, or the
+   DB/engine mapping will silently fall back to `BLINK` / collapse the value
+3. Add an evaluator in `ChallengeEvaluators.evaluate()` and `evaluateFrame()` (engine path)
+4. Add a case to `LivenessEngineService.validateActive()` (HTTP path)
+5. Add parameter generation in `ChallengeSelector.parametersFor()` if the type is parameterised
 
 ### Add a New Workflow
-1. Add value to `WorkflowType` enum (core + models.enums)
-2. Add per-workflow override in config
-3. Add DB seed row in migration
+1. Add the value to `WorkflowType` (core + `models.enums`) and to `ConfigService`'s
+   `toCoreWorkflow` / `toDbWorkflow` switches
+2. Add a per-workflow override in config if it needs different thresholds
+3. Add a `config_policies` row — either as a migration `INSERT` or by writing to
+   `PUT /api/v1/config/{workflowType}` (the controller creates the row on first use)
 
 ### Integrate with Real Device
 1. Implement `DeviceAdapter` for the vendor SDK
@@ -759,6 +1006,7 @@ docker compose up --build
 
 ---
 
-*Last updated: 2026-10-01*
+*Last updated: 2026-10-02*
 *Branch: development*
 *Artifact: `io.mosip.liveness:pad-liveness-backend:1.0.0-SNAPSHOT`*
+*Verified against: 101 main source files / 26 test files / 152 passing tests*

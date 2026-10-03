@@ -23,7 +23,14 @@ public final class LivenessConfig {
     public static final int DEFAULT_PASSIVE_MIN_FRAMES = 5;
     public static final int DEFAULT_PASSIVE_WINDOW_FRAMES = 7;
     public static final int DEFAULT_MIN_CHALLENGE_COUNT = 2;
-    public static final long DEFAULT_CHALLENGE_TIMEOUT_MS = 10_000L;
+    /**
+     * How long a single active challenge stays open. Shortened to 15s at the
+     * product's request — a brisker window keeps the flow snappy. Note this is
+     * tighter than the previous 60s (which existed because an impatient window
+     * was a false-failure source), so watch the challenge failure rate; the
+     * per-workflow {@code config_policies} row can override it at runtime.
+     */
+    public static final long DEFAULT_CHALLENGE_TIMEOUT_MS = 15_000L;
     public static final int DEFAULT_MAX_RETRIES = 2;
     public static final RepeatedFailureAction DEFAULT_REPEATED_FAILURE_ACTION = RepeatedFailureAction.LOCK_OUT;
     // v3 defaults

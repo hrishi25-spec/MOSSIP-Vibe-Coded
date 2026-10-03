@@ -25,7 +25,12 @@ spring:
     properties:
       hibernate:
         format_sql: true
-        dialect: org.hibernate.dialect.PostgreSQLDialect
+        # NOTE: the dialect is intentionally not pinned here. Pinning
+        # PostgreSQLDialect while the dev profile runs H2 made Hibernate read
+        # OffsetDateTime columns back through the JVM's zone, so every persisted
+        # instant shifted by the local offset (a row written at 20:26:54Z read back
+        # as 14:56:54Z on a +05:30 machine). Letting Hibernate pick the dialect from
+        # the actual JDBC connection keeps instants exact on both H2 and PostgreSQL.
 
   # ---- Flyway (replaces Alembic) ----
   flyway:
@@ -42,12 +47,22 @@ spring:
 # ---- MOSIP Liveness Engine ----
 mosip:
   liveness:
+    # Passive liveness scorer:
+    #   auto      - MiniFASNet-V2 (ONNX, bundled in resources/models) when it
+    #               loads; the OpenCV quality heuristic otherwise
+    #   heuristic - force the OpenCV quality heuristic (model-less CI/debug)
+    backend: auto
+    # Optional filesystem override of the bundled model (blank = classpath)
+    model-path: ""
+    # Single source of truth shared with LivenessConfig and config_policies
+    # (V2 migration). Calibrate via GET /api/v1/eval/threshold-sweep — see
+    # docs/configuration.md.
     passive-threshold: 0.80
     min-face-quality: 0.50
     passive-min-frames: 5
     passive-window-frames: 7
     min-challenge-count: 2
-    challenge-timeout-ms: 10000
+    challenge-timeout-ms: 15000
     max-retries: 2
 
 # ---- Logging ----

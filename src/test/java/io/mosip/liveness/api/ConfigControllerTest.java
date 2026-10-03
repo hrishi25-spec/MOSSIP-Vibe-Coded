@@ -64,7 +64,11 @@ class ConfigControllerTest {
         });
         mockMvc.perform(get("/api/v1/config/OPERATOR"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.passiveThreshold").value(0.75));
+                // Seeded rows must carry the single source-of-truth default
+                // (LivenessConfig.DEFAULT_PASSIVE_THRESHOLD = 0.80), not a
+                // private 0.75 literal — see docs/configuration.md.
+                .andExpect(jsonPath("$.passiveThreshold")
+                        .value(io.mosip.liveness.config.LivenessConfig.DEFAULT_PASSIVE_THRESHOLD));
         verify(configRepo).save(any());
     }
 

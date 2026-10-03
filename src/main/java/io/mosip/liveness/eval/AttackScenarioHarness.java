@@ -2,6 +2,7 @@ package io.mosip.liveness.eval;
 
 import io.mosip.liveness.audit.AuditLogger;
 import io.mosip.liveness.audit.MetricsCollector;
+import io.mosip.liveness.backend.LivenessBackend;
 import io.mosip.liveness.backend.MockLivenessBackend;
 import io.mosip.liveness.config.LivenessConfig;
 import io.mosip.liveness.core.Challenge;
@@ -21,6 +22,7 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.SplittableRandom;
+import java.util.function.Function;
 
 /**
  * Automated attack-scenario test harness for CI/regression runs.
@@ -48,10 +50,27 @@ public final class AttackScenarioHarness {
 
     private final LivenessConfig config;
     private final long seed;
+    /** Optional real backend factory; null means the scripted mock. */
+    private final Function<Long, LivenessBackend> backendFactory;
     private int frameCounter;
+
     public AttackScenarioHarness(LivenessConfig config, long seed) {
+        this(config, seed, null);
+    }
+
+    /**
+     * @param backendFactory when present, used instead of the scripted
+     *   {@link MockLivenessBackend} — inject a real backend (e.g.
+     *   {@code OnnxMiniFasNetBackend}) to evaluate genuine model behaviour.
+     *   Attack scripting ({@code Subject}) only exists on the mock, so with an
+     *   injected backend an escalation is recorded as an escalation rather than
+     *   being carried through a scripted active challenge.
+     */
+    public AttackScenarioHarness(LivenessConfig config, long seed,
+                                 Function<Long, LivenessBackend> backendFactory) {
         this.config = config;
         this.seed = seed;
+        this.backendFactory = backendFactory;
     }
 
     /**
@@ -71,9 +90,13 @@ public final class AttackScenarioHarness {
 
     PresentationResult runOne(PresentationLabel label, SplittableRandom rng, long streamSeed) {
         MockLivenessBackend mock = new MockLivenessBackend(new SplittableRandom(streamSeed));
-        configure(mock.subject(), label, rng);
+        boolean scripted = backendFactory == null;
+        if (scripted) {
+            configure(mock.subject(), label, rng);
+        }
+        LivenessBackend backend = scripted ? mock : backendFactory.apply(streamSeed);
 
-        FaceLivenessEngine engine = new FaceLivenessEngine(config, mock, AuditLogger.noop(),
+        FaceLivenessEngine engine = new FaceLivenessEngine(config, backend, AuditLogger.noop(),
                 new MetricsCollector(), Clock.systemUTC());
         String sid = engine.initSession(io.mosip.liveness.core.WorkflowType.RESIDENT_REGISTRATION);
 
@@ -95,7 +118,7 @@ public final class AttackScenarioHarness {
                     accepted = true;
                 } else if (a.status() == AssessmentStatus.ESCALATED_TO_ACTIVE) {
                     escalated = true;
-                    accepted = runActiveStage(engine, sid, mock);
+                    accepted = scripted && runActiveStage(engine, sid, mock);
                 } else if (a.status() == AssessmentStatus.PAD_BLOCKED) {
                     padBlocked = true;
                 }

@@ -11,6 +11,7 @@ import io.mosip.liveness.services.ImageUtils;
 import io.mosip.liveness.services.ConfigService;
 import io.mosip.liveness.services.LivenessEngineService;
 import io.mosip.liveness.services.PadEngineService;
+import io.mosip.liveness.services.ThresholdCalibrationService;
 import org.mockito.Mockito;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
@@ -77,5 +78,10 @@ public class TestConfig {
     @Bean @Primary
     public ConfigService configService() {
         return Mockito.mock(ConfigService.class);
+    }
+
+    @Bean @Primary
+    public ThresholdCalibrationService thresholdCalibrationService() {
+        return Mockito.mock(ThresholdCalibrationService.class);
     }
 }
