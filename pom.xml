@@ -66,12 +66,20 @@
       <version>2.6.0</version>
     </dependency>
 
-    <!-- OpenCV (headless, for face detection / image processing in services) -->
+    <!-- H2 in-memory database (dev profile / zero-dependency local run) -->
+    <dependency>
+      <groupId>com.h2database</groupId>
+      <artifactId>h2</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!-- OpenCV (headless, for face detection / image processing in services).
+         Scope is compile (not provided) so the native libraries are bundled in
+         the executable jar and loadLocally() works under `java -jar`. -->
     <dependency>
       <groupId>org.openpnp</groupId>
       <artifactId>opencv</artifactId>
       <version>4.9.0-0</version>
-      <scope>provided</scope>
     </dependency>
 
     <!-- Lombok (reduce boilerplate) -->
@@ -117,16 +125,4 @@
     </plugins>
   </build>
 
-  <profiles>
-    <profile>
-      <id>dev</id>
-      <dependencies>
-        <dependency>
-          <groupId>com.h2database</groupId>
-          <artifactId>h2</artifactId>
-          <scope>runtime</scope>
-        </dependency>
-      </dependencies>
-    </profile>
-  </profiles>
 </project>

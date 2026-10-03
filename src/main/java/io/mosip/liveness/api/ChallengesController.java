@@ -74,15 +74,22 @@ public class ChallengesController {
             challengeRepo.save(challenge);
             sessionRepo.save(session);
 
+            // A retry_challenge verdict issues a brand-new challenge. Return that
+            // one so the client can immediately validate against it, instead of the
+            // challenge that was just resolved (which is now PASSED or FAILED).
+            Object newlyIssued = result.get("challenge");
+            ChallengeEntity responseChallenge =
+                    newlyIssued instanceof ChallengeEntity issued ? issued : challenge;
+
             ChallengeResponse challengeResp = ChallengeResponse.builder()
-                    .id(challenge.getId())
+                    .id(responseChallenge.getId())
                     .sessionId(sessionId)
-                    .challengeType(challenge.getChallengeType())
-                    .status(challenge.getStatus())
-                    .attemptNumber(challenge.getAttemptNumber())
-                    .timeoutMs(challenge.getTimeoutMs())
-                    .issuedAt(challenge.getIssuedAt())
-                    .completedAt(challenge.getCompletedAt())
+                    .challengeType(responseChallenge.getChallengeType())
+                    .status(responseChallenge.getStatus())
+                    .attemptNumber(responseChallenge.getAttemptNumber())
+                    .timeoutMs(responseChallenge.getTimeoutMs())
+                    .issuedAt(responseChallenge.getIssuedAt())
+                    .completedAt(responseChallenge.getCompletedAt())
                     .build();
 
             return ChallengeValidationResult.builder()

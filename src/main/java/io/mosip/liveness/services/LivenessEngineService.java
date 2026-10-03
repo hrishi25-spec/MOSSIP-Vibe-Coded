@@ -54,6 +54,12 @@ public class LivenessEngineService {
         return Math.max(0.0, Math.min(1.0, score));
     }
 
+    /** Minimum horizontal face-box travel, in pixels, for a head-turn challenge. */
+    private static final double TURN_DELTA = 15.0;
+
+    /** Minimum horizontal face-box travel, in pixels, for a gaze-direction challenge. */
+    private static final double GAZE_DELTA = 10.0;
+
     /**
      * Validate active challenge (blink, smile, turn, etc.) across a sequence of frames.
      */
@@ -70,20 +76,37 @@ public class LivenessEngineService {
 
         return switch (challengeType) {
             case BLINK -> checkBlink(frames, boxes, imageUtils);
-            case TURN_LEFT -> {
-                double delta = boxes.get(boxes.size() - 1)[0] - boxes.get(0)[0];
-                yield delta < -15;
-            }
-            case TURN_RIGHT -> {
-                double delta = boxes.get(boxes.size() - 1)[0] - boxes.get(0)[0];
-                yield delta > 15;
-            }
+
+            // Frames arrive as raw, un-mirrored camera pixels. A camera sees the
+            // subject the way another person does: the subject's own LEFT appears
+            // on the image's RIGHT. Turning one's head to one's own left therefore
+            // moves the face box toward LARGER x.
+            //
+            // Challenge labels are egocentric — the UI tells the person "turn
+            // left", meaning the person's own left — so they map as below. These
+            // were previously swapped, which made every instruction read backwards.
+            case TURN_LEFT -> horizontalDelta(boxes) > TURN_DELTA;
+            case TURN_RIGHT -> horizontalDelta(boxes) < -TURN_DELTA;
+            case LOOK_LEFT -> horizontalDelta(boxes) > GAZE_DELTA;
+            case LOOK_RIGHT -> horizontalDelta(boxes) < -GAZE_DELTA;
+
+            // Vertical gaze cannot be recovered from horizontal box movement.
+            // Fail closed rather than passing on an unrelated sideways motion.
+            case LOOK_UP, LOOK_DOWN -> false;
+
             case SMILE -> checkSmile(frames, boxes, imageUtils);
-            default -> {
-                double delta = boxes.get(boxes.size() - 1)[0] - boxes.get(0)[0];
-                yield Math.abs(delta) > 10;
-            }
+
+            // LOOK_DIRECTION is direction-agnostic by contract.
+            default -> Math.abs(horizontalDelta(boxes)) > GAZE_DELTA;
         };
+    }
+
+    /**
+     * Horizontal displacement of the face box between the first and last frame,
+     * in the raw image's own coordinate system (x grows to the image's right).
+     */
+    private static double horizontalDelta(List<int[]> boxes) {
+        return boxes.get(boxes.size() - 1)[0] - boxes.get(0)[0];
     }
 
     private boolean checkBlink(List<Mat> frames, List<int[]> boxes, ImageUtils imageUtils) {

@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Inline empty icon: stops the browser from requesting /favicon.ico on every load. -->
+<link rel="icon" href="data:,">
+<title>MOSIP Face Liveness &amp; PAD — Test Console</title>
+<style>
+  :root{
+    --bg:#0f1216; --panel:#171b21; --panel2:#1d2229; --line:#2a3038;
+    --fg:#e6eaf0; --muted:#8b96a5; --accent:#4f8cff; --ok:#3ecf8e;
+    --warn:#e0b13a; --bad:#f2555a; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  header{padding:16px 20px;border-bottom:1px solid var(--line);display:flex;
+    align-items:center;gap:14px;flex-wrap:wrap;background:var(--panel)}
+  header h1{margin:0;font-size:15px;font-weight:600;letter-spacing:.2px}
+  .pill{padding:3px 9px;border-radius:999px;font-size:11px;font-weight:600;
+    border:1px solid var(--line);background:var(--panel2);color:var(--muted)}
+  .pill.ok{color:var(--ok);border-color:#1d5b42}
+  .pill.bad{color:var(--bad);border-color:#5b1d20}
+  .pill.warn{color:var(--warn);border-color:#5b4a1d}
+  main{display:grid;grid-template-columns:minmax(340px,1fr) minmax(380px,1.15fr);
+    gap:16px;padding:16px;align-items:start}
+  @media(max-width:940px){main{grid-template-columns:1fr}}
+  section{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  section h2{margin:0;padding:11px 14px;font-size:12px;font-weight:600;letter-spacing:.6px;
+    text-transform:uppercase;color:var(--muted);background:var(--panel2);border-bottom:1px solid var(--line)}
+  .body{padding:14px}
+  /* Mirrored like a selfie, so the preview matches how you see yourself and
+     therefore matches the instruction ("turn left" moves you left on screen).
+     Display-only: CSS never changes captured pixel data, so the frames POSTed to
+     the API remain raw and un-mirrored - which is what the engine expects. */
+  video{width:100%;border-radius:8px;background:#000;display:block;aspect-ratio:4/3;
+    object-fit:cover;transform:scaleX(-1)}
+  button{font:inherit;font-weight:600;padding:9px 14px;border-radius:8px;border:1px solid var(--line);
+    background:var(--panel2);color:var(--fg);cursor:pointer}
+  button:hover:not(:disabled){border-color:#3d4753}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  button.danger{background:#3a1c1e;border-color:#6d2a2e;color:#ffc9cb}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .row+.row{margin-top:9px}
+  label.field{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--muted);flex:1;min-width:110px}
+  input,select{font:inherit;padding:7px 9px;border-radius:7px;border:1px solid var(--line);
+    background:#12161b;color:var(--fg);width:100%}
+  .verdict{padding:12px;border-radius:8px;border:1px solid var(--line);background:var(--panel2)}
+  .verdict .action{font:600 16px/1.3 var(--mono)}
+  .verdict .msg{color:var(--muted);margin-top:4px}
+  .verdict.proceed{border-color:#1d5b42;background:#12241c}
+  .verdict.reject{border-color:#5b1d20;background:#241214}
+  .verdict.escalate{border-color:#5b4a1d;background:#241f12}
+  /* Big icon + short word for each challenge, so the instruction reads without
+     language or literacy. The overlay sits on the video but outside the video's
+     mirrored transform, so the symbol itself is never flipped. */
+  .video-wrap{position:relative;border-radius:8px;overflow:hidden}
+  .cue{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:14px;
+    padding:16px;background:linear-gradient(180deg,rgba(15,18,22,0),rgba(15,18,22,.94) 40%)}
+  .cue .icon{font-size:56px;line-height:1}
+  .cue .txt{display:flex;flex-direction:column}
+  .cue .label{font-size:21px;font-weight:700}
+  .cue .sub{font-size:12.5px;color:var(--muted);margin-top:2px}
+  .cue.flash .icon{animation:cuepop .45s ease}
+  @keyframes cuepop{0%{transform:scale(.55)}60%{transform:scale(1.18)}100%{transform:scale(1)}}
+  .icon-lg{margin-right:7px}
+  pre{margin:0;font:12px/1.5 var(--mono);white-space:pre-wrap;word-break:break-word;
+    max-height:260px;overflow:auto;color:#b9c4d2}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:5px 12px;font-size:12.5px}
+  .kv dt{color:var(--muted)}
+  .kv dd{margin:0;font-family:var(--mono)}
+  .hint{font-size:12px;color:var(--muted);margin-top:10px}
+  .warnbox{padding:11px 13px;border-radius:8px;border:1px solid #5b4a1d;background:#241f12;
+    color:#f0dca6;font-size:12.5px;margin-bottom:14px}
+  .steps{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+  .step{font-size:11px;padding:4px 9px;border-radius:999px;border:1px solid var(--line);
+    color:var(--muted);background:var(--panel2)}
+  .step.active{color:#fff;background:var(--accent);border-color:var(--accent)}
+  .step.done{color:var(--ok);border-color:#1d5b42}
+  .spacer{flex:1}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>MOSIP Face Liveness &amp; PAD — Test Console</h1>
+  <span class="pill" id="pill-health">checking…</span>
+  <span class="pill" id="pill-engine">engine…</span>
+  <span class="spacer"></span>
+  <span class="pill" id="pill-session">no session</span>
+</header>
+
+<main>
+  <div>
+    <section>
+      <h2>Capture</h2>
+      <div class="body">
+        <div id="engine-warn" class="warnbox" hidden></div>
+
+        <div class="steps">
+          <span class="step" id="s1">1 · Session</span>
+          <span class="step" id="s2">2 · Passive liveness</span>
+          <span class="step" id="s3">3 · Active challenge</span>
+          <span class="step" id="s4">4 · Verdict</span>
+        </div>
+
+        <div class="video-wrap">
+          <video id="video" autoplay playsinline muted></video>
+          <div class="cue" id="cue" role="status" aria-live="polite" hidden>
+            <span class="icon" id="cue-icon" aria-hidden="true"></span>
+            <span class="txt">
+              <span class="label" id="cue-label"></span>
+              <span class="sub" id="cue-sub"></span>
+            </span>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:12px">
+          <label class="field">Workflow
+            <select id="workflow">
+              <option value="RESIDENT">RESIDENT</option>
+              <option value="OPERATOR">OPERATOR</option>
+              <option value="SUPERVISOR">SUPERVISOR</option>
+            </select>
+          </label>
+          <label class="field">Device ID
+            <input id="deviceId" value="L1-CAM-01">
+          </label>
+        </div>
+
+        <div class="row" style="margin-top:12px">
+          <button id="btn-camera">Start camera</button>
+          <button id="btn-run" class="primary" disabled>Run liveness check</button>
+          <button id="btn-stop" class="danger" disabled>Stop</button>
+        </div>
+
+        <div id="verdict" class="verdict" style="margin-top:14px" hidden>
+          <div class="action" id="verdict-action"></div>
+          <div class="msg" id="verdict-msg"></div>
+        </div>
+
+        <p class="hint">
+          The preview is <b>mirrored</b> (like a selfie) so it matches the instruction —
+          turn your head to <em>your own</em> left when asked to turn left. The frames sent
+          to the engine stay raw and un-mirrored.
+        </p>
+        <p class="hint">
+          The page must be opened at <b>http://localhost:8000</b> — browsers only expose
+          the camera on a secure origin, and <code>localhost</code> counts as one.
+        </p>
+      </div>
+    </section>
+
+    <section style="margin-top:16px">
+      <h2>Operational metrics</h2>
+      <div class="body"><dl class="kv" id="metrics"><dt>—</dt><dd>—</dd></dl>
+        <div class="row" style="margin-top:12px"><button id="btn-metrics">Refresh metrics</button></div>
+      </div>
+    </section>
+  </div>
+
+  <div>
+    <section>
+      <h2>Decision log</h2>
+      <div class="body"><pre id="log">Ready.</pre></div>
+    </section>
+
+    <section style="margin-top:16px">
+      <h2>Last frame verdict</h2>
+      <div class="body"><dl class="kv" id="last"><dt>—</dt><dd>—</dd></dl></div>
+    </section>
+
+    <section style="margin-top:16px">
+      <h2>Audit trail</h2>
+      <div class="body">
+        <pre id="audit">No session yet.</pre>
+        <div class="row" style="margin-top:12px">
+          <button id="btn-audit">Refresh audit</button>
+          <button id="btn-close">Close session</button>
+        </div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script>
+(() => {
+  "use strict";
+
+  const API = "/api/v1";
+  const $ = id => document.getElementById(id);
+  const video = $("video");
+
+  let stream = null, running = false, sessionId = null, lastChallenge = null;
+
+  // ---------- helpers ----------
+  const logEl = $("log");
+  function log(msg) {
+    const t = new Date().toLocaleTimeString();
+    logEl.textContent += `\n[${t}] ${msg}`;
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  function setStep(n, cls) {
+    const el = $("s" + n);
+    el.classList.remove("active", "done");
+    if (cls) el.classList.add(cls);
+  }
+  function resetSteps() { [1,2,3,4].forEach(n => setStep(n, null)); }
+  function kv(dl, obj) {
+    dl.innerHTML = "";
+    for (const [k, v] of Object.entries(obj)) {
+      const dt = document.createElement("dt"); dt.textContent = k;
+      const dd = document.createElement("dd"); dd.textContent = v === null || v === undefined ? "—" : String(v);
+      dl.append(dt, dd);
+    }
+  }
+  function verdict(kind, action, message, icon) {
+    const box = $("verdict");
+    box.hidden = false;
+    box.className = "verdict " + (kind || "");
+    const a = $("verdict-action");
+    a.textContent = "";
+    if (icon) {
+      const s = document.createElement("span");
+      s.className = "icon-lg";
+      s.setAttribute("aria-hidden", "true");
+      s.textContent = icon;
+      a.append(s);
+    }
+    a.append(document.createTextNode(action || ""));
+    $("verdict-msg").textContent = message || "";
+  }
+
+  async function api(path, options) {
+    const res = await fetch(API + path, Object.assign({
+      headers: { "Content-Type": "application/json" }
+    }, options || {}));
+    const text = await res.text();
+    let body = null;
+    try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+    if (!res.ok) {
+      const detail = body && body.error ? `${body.error}: ${body.message}` : `HTTP ${res.status}`;
+      throw new Error(detail);
+    }
+    return body;
+  }
+
+  function grabFrame(quality = 0.85) {
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+    canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/jpeg", quality);
+  }
+
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  // Icon + short word for every challenge, so the instruction can be understood
+  // without reading a sentence or knowing the language. The word remains the
+  // accessible label; the icon is decorative.
+  const CHALLENGE_CUES = {
+    BLINK:           { icon: "👁️", label: "Blink your eyes" },
+    SMILE:           { icon: "😊", label: "Smile" },
+    TURN_LEFT:       { icon: "👈", label: "Turn head left" },
+    TURN_RIGHT:      { icon: "👉", label: "Turn head right" },
+    TURN_HEAD_LEFT:  { icon: "👈", label: "Turn head left" },
+    TURN_HEAD_RIGHT: { icon: "👉", label: "Turn head right" },
+    LOOK_DIRECTION:  { icon: "🧭", label: "Look as shown" },
+    LOOK_UP:         { icon: "☝️", label: "Look up" },
+    LOOK_DOWN:       { icon: "👇", label: "Look down" },
+    LOOK_LEFT:       { icon: "👈", label: "Look left" },
+    LOOK_RIGHT:      { icon: "👉", label: "Look right" }
+  };
+  // Unknown/new challenge types still get a symbol and their raw name rather
+  // than an empty overlay.
+  function challengeCue(type) {
+    const key = String(type || "").toUpperCase();
+    return CHALLENGE_CUES[key]
+      || { icon: "🔎", label: key ? key.replace(/_/g, " ").toLowerCase() : "Follow the instruction" };
+  }
+  function showCue(icon, label, sub, flash = true) {
+    const el = $("cue");
+    el.hidden = false;
+    $("cue-icon").textContent = icon;
+    $("cue-label").textContent = label;
+    $("cue-sub").textContent = sub || "";
+    if (flash) { el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash"); }
+  }
+  function hideCue() { $("cue").hidden = true; }
+
+  // ---------- health ----------
+  async function refreshHealth() {
+    try {
+      const res = await fetch("/health");
+      const h = await res.json();
+      $("pill-health").textContent = "service: " + h.status;
+      $("pill-health").className = "pill ok";
+      const available = h.engine === "available";
+      $("pill-engine").textContent = "engine: " + h.engine;
+      $("pill-engine").className = "pill " + (available ? "ok" : "warn");
+      const warn = $("engine-warn");
+      if (available) {
+        warn.hidden = true;
+      } else {
+        warn.hidden = false;
+        warn.textContent = "The OpenCV native library is unavailable on this platform, so "
+          + "frame processing is disabled and every frame request will return 503.";
+      }
+    } catch {
+      $("pill-health").textContent = "service: unreachable";
+      $("pill-health").className = "pill bad";
+    }
+  }
+
+  // ---------- camera ----------
+  $("btn-camera").addEventListener("click", async () => {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" }, audio: false
+      });
+      video.srcObject = stream;
+      $("btn-camera").disabled = true;
+      $("btn-run").disabled = false;
+      log("Camera started.");
+    } catch (e) {
+      log("Camera error: " + e.message
+        + "\n  Browsers expose the camera only on a secure origin — use http://localhost:8000");
+    }
+  });
+
+  // ---------- the liveness run ----------
+  $("btn-run").addEventListener("click", async () => {
+    if (running) return;
+    running = true;
+    $("btn-run").disabled = true;
+    $("btn-stop").disabled = false;
+    resetSteps();
+    hideCue();
+    $("audit").textContent = "No entries yet.";
+    $("last").innerHTML = "<dt>—</dt><dd>—</dd>";
+
+    try {
+      // 1 — session
+      setStep(1, "active");
+      const session = await api("/sessions", {
+        method: "POST",
+        body: JSON.stringify({
+          workflowType: $("workflow").value,
+          deviceId: $("deviceId").value || "WEB-CAM"
+        })
+      });
+      sessionId = session.id;
+      lastChallenge = null;
+      $("pill-session").textContent = "session " + sessionId.slice(0, 8);
+      $("pill-session").className = "pill ok";
+      log(`Session created: ${sessionId}\n  workflow=${session.workflowType} status=${session.status}`);
+      setStep(1, "done");
+
+      // 2 — passive
+      setStep(2, "active");
+      let escalated = null, outcome = null;
+      for (let i = 1; i <= 12 && running; i++) {
+        const frame = grabFrame();
+        const r = await api(`/sessions/${sessionId}/frames`, {
+          method: "POST",
+          body: JSON.stringify({ frameBase64: frame })
+        });
+        kv($("last"), {
+          sessionId: r.sessionId, stage: r.stage, faceDetected: r.faceDetected,
+          multipleFaces: r.multipleFaces, faceQuality: fmt(r.faceQuality),
+          livenessScore: fmt(r.livenessScore), padFlag: r.padFlag,
+          padAttackType: r.padAttackType, action: r.action, message: r.message
+        });
+        log(`frame ${i}: action=${r.action} face=${r.faceDetected}`
+          + ` quality=${fmt(r.faceQuality)} score=${fmt(r.livenessScore)}`
+          + (r.padAttackType ? ` pad=${r.padAttackType}` : ""));
+
+        if (r.action === "escalate_to_active") { escalated = r; break; }
+        if (r.action === "proceed" || r.action === "reject") { outcome = r; break; }
+        await sleep(350);
+      }
+
+      if (!outcome && escalated) {
+        setStep(2, "done");
+        setStep(3, "active");
+        outcome = await runChallenges(escalated);
+      } else {
+        setStep(2, "done");
+      }
+
+      if (running) {
+        setStep(3, "done");
+        setStep(4, "active");
+        if (outcome && outcome.action === "proceed") {
+          verdict("proceed", "PROCEED", outcome.message || "Liveness verified.", "✅");
+        } else if (outcome) {
+          verdict("reject", "REJECT", outcome.message || "Liveness could not be verified.", "⛔");
+        } else {
+          verdict("", "INCOMPLETE", "No terminal verdict was reached.", "🤔");
+        }
+        setStep(4, "done");
+        // Keep the outcome on the video instead of clearing the cue: right after
+        // the action, the result panel below the fold is easy to miss.
+        if (outcome && outcome.action === "proceed") {
+          showCue("✅", "Verified", "Liveness check passed");
+        } else if (outcome) {
+          showCue("⛔", "Not verified", outcome.message || "Liveness could not be verified.");
+        } else {
+          showCue("🤔", "Incomplete", "No terminal verdict was reached.");
+        }
+      }
+      await refreshAudit();
+      await refreshMetrics();
+    } catch (e) {
+      log("ERROR: " + e.message);
+      verdict("reject", "ERROR", e.message, "⚠️");
+      showCue("⚠️", "Error", e.message);
+    } finally {
+      running = false;
+      $("btn-run").disabled = false;
+      $("btn-stop").disabled = true;
+    }
+  });
+
+  // Active challenge-response loop.
+  async function runChallenges(escalation) {
+    let challenge = escalation.challenge;
+    let rounds = 0;
+    while (challenge && rounds < 5 && running) {
+      rounds++;
+      lastChallenge = challenge;
+      const readable = challenge.challengeType.replace(/_/g, " ").toLowerCase();
+      const cue = challengeCue(challenge.challengeType);
+      showCue(cue.icon, cue.label, `Perform "${readable}" — hold the pose`);
+      log(`challenge ${rounds}: ${challenge.challengeType} (timeout ${challenge.timeoutMs}ms)`
+        + ` — perform "${readable}" and hold it`);
+      verdict("escalate", "ACTION REQUIRED",
+        (escalation.message || `Please ${readable}.`) + " Hold the pose until capture finishes.", cue.icon);
+      await sleep(1600); // time to react before the capture window opens
+
+      // The evaluators compare the first and last frame of the burst, and a blink
+      // or a full head turn takes far longer than a couple of frames — so capture
+      // a window wide enough to actually contain the action, and keep the pose held.
+      const frames = [];
+      const FRAME_COUNT = 16;
+      for (let f = 0; f < FRAME_COUNT && running; f++) {
+        frames.push(grabFrame(0.9));
+        showCue(cue.icon, cue.label, `Hold the pose — ${f + 1}/${FRAME_COUNT}`, false);
+        verdict("escalate", "CAPTURING…", `Perform "${readable}" — ${f + 1}/${FRAME_COUNT}`, cue.icon);
+        await sleep(150);
+      }
+      // The two challenge shapes disagree on the id field:
+      //   escalation response (FrameProcessResult.ChallengeInfo) -> `challengeId`
+      //   retry response      (ChallengeResponse)                -> `id`
+      // Accept either, and fail loudly rather than posting a null id.
+      const challengeId = challenge.challengeId || challenge.id;
+      if (!challengeId) throw new Error("Server returned a challenge without an id");
+
+      const r = await api(`/sessions/${sessionId}/challenges/validate`, {
+        method: "POST",
+        body: JSON.stringify({ challengeId, framesBase64: frames })
+      });
+      log(`challenge ${rounds} result: passed=${r.passed} action=${r.action} ${r.message || ""}`);
+      if (r.passed) showCue("✅", "Action detected", "Good — hold still");
+
+      if (r.action === "proceed" || r.action === "reject") {
+        return { action: r.action, message: r.message };
+      }
+      // retry_challenge — the response carries the next challenge
+      challenge = r.challenge;
+      escalation = r;
+      if (!challenge) return { action: r.action, message: r.message };
+    }
+    return { action: null, message: "Challenge budget exhausted." };
+  }
+
+  $("btn-stop").addEventListener("click", () => {
+    running = false;
+    log("Stop requested.");
+    $("btn-stop").disabled = true;
+  });
+
+  function fmt(v) { return v === null || v === undefined ? "—" : Number(v).toFixed(3); }
+
+  // ---------- metrics / audit / session ----------
+  async function refreshMetrics() {
+    try {
+      const m = await api("/metrics");
+      kv($("metrics"), m);
+    } catch (e) { log("metrics error: " + e.message); }
+  }
+  async function refreshAudit() {
+    if (!sessionId) return;
+    try {
+      const entries = await api(`/sessions/${sessionId}/audit`);
+      $("audit").textContent = entries.length
+        ? entries.map(e => `${e.createdAt}  ${e.eventType}  ${JSON.stringify(e.details)}`).join("\n")
+        : "(no audit entries — audit records are written for PAD rejections, challenge issue/pass/fail and session outcomes)";
+    } catch (e) { log("audit error: " + e.message); }
+  }
+  $("btn-metrics").addEventListener("click", refreshMetrics);
+  $("btn-audit").addEventListener("click", refreshAudit);
+  $("btn-close").addEventListener("click", async () => {
+    if (!sessionId) { log("No session to close."); return; }
+    try {
+      const s = await api(`/sessions/${sessionId}/close`, { method: "POST" });
+      log(`Session closed: status=${s.status} frames=${s.totalFramesEvaluated}`
+        + ` challenges=${s.totalChallengesIssued} duration=${s.durationMs}ms`);
+      $("pill-session").textContent = "session " + sessionId.slice(0, 8) + " (" + s.status + ")";
+      $("pill-session").className = "pill";
+      await refreshAudit();
+    } catch (e) { log("close error: " + e.message); }
+  });
+
+  refreshHealth();
+  refreshMetrics();
+  setInterval(refreshHealth, 15000);
+})();
+</script>
+</body>
+</html>

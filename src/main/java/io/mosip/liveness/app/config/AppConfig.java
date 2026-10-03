@@ -46,15 +46,32 @@ public class AppConfig {
     @Value("${mosip.liveness.max-retries:2}")
     private int maxRetries;
 
+    private static volatile boolean openCvAvailable;
+
     @PostConstruct
     void init() {
-        // Load OpenCV native library if available on classpath
+        // Load the OpenCV native library bundled in the opencv jar.
+        //
+        // openpnp extracts the native binary into a per-JVM temp directory and
+        // deletes stale directories on startup; that extraction can transiently
+        // race with another JVM (or a leftover directory) and fail. A failure
+        // surfaces as an Error (UnsatisfiedLinkError / ExceptionInInitializerError),
+        // not an Exception, so catching Exception alone would abort application
+        // startup. Degrade instead, and report the state through /health.
         try {
             nu.pattern.OpenCV.loadLocally();
+            openCvAvailable = true;
             log.info("OpenCV native library loaded successfully");
-        } catch (Exception e) {
-            log.warn("OpenCV native library not available on classpath; image processing will use mock heuristics", e);
+        } catch (Throwable t) {
+            openCvAvailable = false;
+            log.warn("OpenCV native library could not be loaded; frame-processing "
+                    + "endpoints will return 503 until it is available", t);
         }
+    }
+
+    /** True when the OpenCV native library loaded and frame processing is usable. */
+    public static boolean isOpenCvAvailable() {
+        return openCvAvailable;
     }
 
     @Bean
@@ -99,9 +116,10 @@ public class AppConfig {
             @Override
             public void addCorsMappings(CorsRegistry registry) {
                 registry.addMapping("/**")
-                        .allowedOrigins("*")
-                        .allowedMethods("*")
-                        .allowedHeaders("*");
+                        .allowedOrigins("http://localhost:*", "http://127.0.0.1:*")
+                        .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
+                        .allowedHeaders("Content-Type", "Authorization")
+                        .allowCredentials(false);
             }
         };
     }

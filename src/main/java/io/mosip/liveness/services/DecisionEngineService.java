@@ -262,7 +262,8 @@ public class DecisionEngineService {
             return Map.of(
                     "passed", true,
                     "action", "retry_challenge",
-                    "message", "Action detected. One more check required.");
+                    "message", "Action detected. One more check required.",
+                    "challenge", issueNextChallenge(session, policy, challenge.getChallengeType()));
         }
 
         // Failed
@@ -284,7 +285,43 @@ public class DecisionEngineService {
         return Map.of(
                 "passed", false,
                 "action", "retry_challenge",
-                "message", "We could not verify that action. Let's try a different one.");
+                "message", "We could not verify that action. Let's try a different one.",
+                "challenge", issueNextChallenge(session, policy, challenge.getChallengeType()));
+    }
+
+    /**
+     * Issues and persists the next challenge, avoiding an immediate repeat of
+     * {@code previousType}.
+     *
+     * <p>A {@code retry_challenge} verdict previously handed the client back the
+     * very challenge that had just been resolved, so its follow-up validation was
+     * rejected with 409 (that challenge was already PASSED or FAILED). A freshly
+     * ISSUED challenge is required instead.</p>
+     */
+    private ChallengeEntity issueNextChallenge(LivenessSession session, EffectivePolicy policy,
+                                               io.mosip.liveness.models.enums.ChallengeType previousType) {
+        io.mosip.liveness.models.enums.ChallengeType nextType = challengeSelector.selectChallenge(
+                policy.allowedChallenges().stream()
+                        .map(ct -> configService.toDbChallenge(ct).name().toLowerCase())
+                        .collect(Collectors.toList()),
+                previousType != null ? previousType.name() : null);
+
+        int attempt = (int) challengeRepo.countBySessionId(session.getId()) + 1;
+        ChallengeEntity next = ChallengeEntity.builder()
+                .session(session)
+                .challengeType(nextType)
+                .status(ChallengeStatus.ISSUED)
+                .attemptNumber(attempt)
+                .timeoutMs((int) policy.challengeTimeoutMs())
+                .issuedAt(OffsetDateTime.now())
+                .build();
+        challengeRepo.save(next);
+
+        logAudit(session, "CHALLENGE_ISSUED", Map.of(
+                "challengeType", nextType.name(),
+                "attemptNumber", attempt,
+                "timeoutMs", next.getTimeoutMs()));
+        return next;
     }
 
     private void saveFrameEvent(LivenessSession session, boolean faceDetected, boolean multipleFaces,
