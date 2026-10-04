@@ -1,7 +1,9 @@
 package io.mosip.liveness.api;
 
 import io.mosip.liveness.config.EffectivePolicy;
+import io.mosip.liveness.config.EffectivePolicyValidator;
 import io.mosip.liveness.config.LivenessConfig;
+import io.mosip.liveness.config.WorkflowPolicyDefaults;
 import io.mosip.liveness.audit.AuditChain;
 import io.mosip.liveness.audit.AuditEventType;
 import io.mosip.liveness.dto.AuditLogEntry;
@@ -49,6 +51,7 @@ public class ConfigController {
     private final ConfigPolicyRepository configRepo;
     private final AuditLogRepository auditLogRepo;
     private final ConfigService configService;
+    private final EffectivePolicyValidator effectivePolicyValidator;
 
     /**
      * Admin key required to mutate policy — fail-closed: when the key is not
@@ -120,6 +123,11 @@ public class ConfigController {
         if (update.getOnRepeatedFailure() != null) {
             policy.setOnRepeatedFailure(FailurePolicy.valueOf(update.getOnRepeatedFailure()));
         }
+
+        // Cross-field invariants on the merged row: a per-field check cannot see
+        // that e.g. minChallengeCount now exceeds the challenge-type pool, or
+        // that the window would not run as configured.
+        effectivePolicyValidator.validate(configService.mapToEffectivePolicy(policy));
 
         configRepo.save(policy);
         // Same transaction as the update: a rollback must not leave a phantom
@@ -370,9 +378,9 @@ public class ConfigController {
 
     private void validate(ConfigPolicyUpdate update) {
         if (update.getPassiveThreshold() != null &&
-                (update.getPassiveThreshold() < 0.0 || update.getPassiveThreshold() > 1.0)) {
+                (update.getPassiveThreshold() <= 0.0 || update.getPassiveThreshold() > 1.0)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "passiveThreshold must be between 0.0 and 1.0");
+                    "passiveThreshold must be greater than 0.0 and at most 1.0");
         }
         if (update.getMinChallengeCount() != null && update.getMinChallengeCount() < 1) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
@@ -407,18 +415,27 @@ public class ConfigController {
                 .orElseGet(() -> configRepo.save(newPolicy(workflowType)));
     }
 
-    /** Defaults for a workflow that has no {@code config_policies} row yet. */
-    private static ConfigPolicy newPolicy(WorkflowType workflowType) {
+    /**
+     * Defaults for a workflow that has no {@code config_policies} row yet, taken
+     * from the same per-workflow source the V4 migration seeds from — so a
+     * lazily-created row is identical to a migrated one instead of silently
+     * collapsing all three workflows onto one operating point.
+     */
+    private ConfigPolicy newPolicy(WorkflowType workflowType) {
+        EffectivePolicy defaults = WorkflowPolicyDefaults.forWorkflow(
+                configService.toCoreWorkflow(workflowType));
         return ConfigPolicy.builder()
                 .workflowType(workflowType)
-                .livenessEnabled(true)
-                .passiveThreshold(io.mosip.liveness.config.LivenessConfig.DEFAULT_PASSIVE_THRESHOLD)
-                .activeLivenessEnabled(true)
-                .minChallengeCount(1)
-                .challengeTypes(List.of("blink", "smile", "turn_left", "turn_right"))
-                .challengeTimeoutMs((int) io.mosip.liveness.config.LivenessConfig.DEFAULT_CHALLENGE_TIMEOUT_MS)
-                .maxRetryCount(3)
-                .onRepeatedFailure(FailurePolicy.LOCK)
+                .livenessEnabled(defaults.livenessEnabled())
+                .passiveThreshold(defaults.passiveThreshold())
+                .activeLivenessEnabled(defaults.activeLivenessEnabled())
+                .minChallengeCount(defaults.minChallengeCount())
+                .challengeTypes(defaults.allowedChallenges().stream()
+                        .map(c -> configService.toDbChallenge(c).name().toLowerCase())
+                        .toList())
+                .challengeTimeoutMs((int) defaults.challengeTimeoutMs())
+                .maxRetryCount(defaults.maxRetries())
+                .onRepeatedFailure(configService.toDbFailure(defaults.onRepeatedFailure()))
                 .build();
     }
 

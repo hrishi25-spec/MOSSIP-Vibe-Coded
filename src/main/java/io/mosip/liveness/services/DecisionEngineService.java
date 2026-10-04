@@ -114,9 +114,9 @@ public class DecisionEngineService {
         // while the other issues a challenge.
         LivenessSession session = sessionRepo.findByIdForUpdate(in.getId()).orElse(in);
 
-        // Read effective policy from DB (updates via API take effect immediately)
-        EffectivePolicy policy = configService.getEffectivePolicy(
-                configService.toCoreWorkflow(session.getWorkflowType()));
+        // The session's frozen policy (resolved + validated at creation), or a
+        // live read for legacy sessions created before the snapshot existed.
+        EffectivePolicy policy = resolvePolicy(session);
         double passiveThreshold = policy.passiveThreshold();
 
         // ---- Challenge lock -----------------------------------------------------
@@ -211,6 +211,33 @@ public class DecisionEngineService {
                     .padAttackType(padResult.attackType().name())
                     .action("reject")
                     .message("Face verification could not be completed. Please try again.")
+                    .build();
+        }
+
+        // ---- Liveness disabled ------------------------------------------------
+        // When a workflow disables liveness, skip only the passive median window
+        // and active challenges. The face-detection gate and the PAD gate above
+        // have already run and stay fail-closed: a confirmed presentation attack
+        // still rejects the session. The bypass is audited (once, on this
+        // terminal transition) so a disabled workflow is never silent.
+        if (!policy.livenessEnabled()) {
+            saveFrameEvent(session, true, false, observation.faceQuality(), null,
+                    false, null, padResult.confidence());
+            session.setFinalResult(true);
+            session.setStatus(SessionStatus.PASSED);
+            session.setCurrentStage(LivenessStage.COMPLETED);
+            session.setClosedAt(OffsetDateTime.now());
+            logAudit(session, "LIVENESS_DISABLED", Map.of(
+                    "via", "policy_disabled",
+                    "padChecked", true));
+            return FrameProcessResult.builder()
+                    .sessionId(session.getId())
+                    .stage(LivenessStage.COMPLETED)
+                    .faceDetected(true)
+                    .faceQuality(observation.faceQuality())
+                    .padFlag(false)
+                    .action("proceed")
+                    .message("Liveness verification is disabled for this workflow.")
                     .build();
         }
 
@@ -349,9 +376,8 @@ public class DecisionEngineService {
         // frame submission deciding on the same session.
         LivenessSession session = sessionRepo.findByIdForUpdate(in.getId()).orElse(in);
 
-        // Read effective policy from DB
-        EffectivePolicy policy = configService.getEffectivePolicy(
-                configService.toCoreWorkflow(session.getWorkflowType()));
+        // The session's frozen policy (see resolvePolicy)
+        EffectivePolicy policy = resolvePolicy(session);
         int maxRetry = policy.maxRetries();
         int minChallengeCount = policy.minChallengeCount();
 
@@ -444,6 +470,21 @@ public class DecisionEngineService {
                 "action", "retry_challenge",
                 "message", "We could not verify that action. Let's try a different one.",
                 "challenge", issueChallenge(session, policy));
+    }
+
+    /**
+     * The policy that governs a session: the snapshot frozen at creation when
+     * present, otherwise a live read for legacy rows created before V4. Keeping
+     * the snapshot authoritative means an admin edit to {@code config_policies}
+     * cannot change an in-flight session's operating point.
+     */
+    private EffectivePolicy resolvePolicy(LivenessSession session) {
+        EffectivePolicy snapshot = session.getPolicySnapshot();
+        if (snapshot != null) {
+            return snapshot;
+        }
+        return configService.getEffectivePolicy(
+                configService.toCoreWorkflow(session.getWorkflowType()));
     }
 
     /**

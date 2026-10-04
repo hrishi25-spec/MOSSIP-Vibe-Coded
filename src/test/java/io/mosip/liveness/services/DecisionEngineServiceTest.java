@@ -28,6 +28,7 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -249,6 +250,22 @@ class DecisionEngineServiceTest {
         assertNotNull(challenge.getCompletedAt());
         assertEquals(SessionStatus.PASSED, session.getStatus());
         assertEquals(0, session.getRetryCount());
+    }
+
+    @Test
+    void twoChallengeWorkflowNeedsASecondChallengeBeforeProceeding() {
+        // Supervisor default: minChallengeCount = 2. The first challenge passing
+        // must ask for another, not complete the session.
+        when(configService.getEffectivePolicy(any())).thenReturn(policy(2, 2));
+        when(livenessEngine.validateActive(eq(DB_TURN_LEFT), anyList(), any())).thenReturn(true);
+        when(challengeRepo.countBySessionIdAndStatus(any(), any())).thenReturn(1L);
+
+        Map<String, Object> result =
+                service.processChallengeValidation(session, challenge, frames, imageUtils);
+
+        assertEquals("retry_challenge", result.get("action"));
+        assertNotNull(result.get("challenge"), "a second challenge must be issued");
+        assertNotEquals(SessionStatus.PASSED, session.getStatus());
     }
 
     @Test

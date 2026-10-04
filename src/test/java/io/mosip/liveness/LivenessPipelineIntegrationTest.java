@@ -530,34 +530,37 @@ class LivenessPipelineIntegrationTest {
         assertNotNull(allowHeaders, "preflight must allow the requested headers");
         assertTrue(allowHeaders.toLowerCase().contains("x-admin-api-key"), allowHeaders);
 
-        // The console's own call: browser headers + admin key.
+        // The console's own call: browser headers + admin key. The value must
+        // differ from the RESIDENT default V4 seeds (20s): a PUT that resubmits
+        // the current policy is audited but records no field movement, and this
+        // test asserts the movement.
         HttpHeaders save = browserHeaders(sameOrigin);
         save.add(ADMIN_HEADER, ADMIN_KEY);
         RawResponse saved = send(HttpMethod.PUT, RESIDENT_CONFIG,
-                "{\"challengeTimeoutMs\":20000}", save);
+                "{\"challengeTimeoutMs\":25000}", save);
         assertEquals(200, saved.status(), saved.body());
         assertEquals("nosniff", saved.header("X-Content-Type-Options"));
         JsonNode applied = mapper.readTree(saved.body());
         assertEquals("RESIDENT", applied.get("workflowType").asText());
-        assertEquals(20000, applied.get("challengeTimeoutMs").asInt());
+        assertEquals(25000, applied.get("challengeTimeoutMs").asInt());
 
         // Accepted and applied — so it must also be traceable.
         JsonNode feed = expect(HttpStatus.OK,
                 exchange(HttpMethod.GET, "/api/v1/config/audit?limit=50", null, false));
         JsonNode entry = firstChangeFor(feed, "RESIDENT");
         assertNotNull(entry, "a browser-style PUT must leave an audit entry: " + feed);
-        assertEquals(20000, entry.get("details").get("changes")
+        assertEquals(25000, entry.get("details").get("changes")
                 .get("challengeTimeoutMs").get("to").asInt());
 
         // Browser headers are not a bypass: the same request without the key is
         // still refused, and writes nothing.
         RawResponse noKey = send(HttpMethod.PUT, RESIDENT_CONFIG,
-                "{\"challengeTimeoutMs\":25000}", browserHeaders(sameOrigin));
+                "{\"challengeTimeoutMs\":30000}", browserHeaders(sameOrigin));
         assertEquals(403, noKey.status(), noKey.body());
         assertEquals("FORBIDDEN", mapper.readTree(noKey.body()).get("error").asText());
         JsonNode after = expect(HttpStatus.OK,
                 exchange(HttpMethod.GET, "/api/v1/config/RESIDENT", null, false));
-        assertEquals(20000, after.get("challengeTimeoutMs").asInt(),
+        assertEquals(25000, after.get("challengeTimeoutMs").asInt(),
                 "a rejected PUT must not change the policy");
 
         // A foreign origin is refused by the CORS processor before the key is
@@ -565,11 +568,11 @@ class LivenessPipelineIntegrationTest {
         HttpHeaders foreign = browserHeaders("https://evil.example");
         foreign.add(ADMIN_HEADER, ADMIN_KEY);
         RawResponse evil = send(HttpMethod.PUT, RESIDENT_CONFIG,
-                "{\"challengeTimeoutMs\":25000}", foreign);
+                "{\"challengeTimeoutMs\":30000}", foreign);
         assertEquals(403, evil.status(), evil.body());
         JsonNode unchanged = expect(HttpStatus.OK,
                 exchange(HttpMethod.GET, "/api/v1/config/RESIDENT", null, false));
-        assertEquals(20000, unchanged.get("challengeTimeoutMs").asInt(),
+        assertEquals(25000, unchanged.get("challengeTimeoutMs").asInt(),
                 "a cross-origin PUT must not change the policy either");
     }
 

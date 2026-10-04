@@ -639,7 +639,27 @@ Base configuration with all defaults. Created once at startup. Supports per-work
 Every field is nullable (null = inherit from base). Applied via `LivenessConfig.effectivePolicy(workflow)`.
 
 ### `EffectivePolicy` (resolved for one session)
-Record with all fields fully resolved (base + override merged). Passed to each `LivenessSession`.
+Record with all fields fully resolved (base + override merged). Resolved and validated once at
+session creation (`ConfigService` + `EffectivePolicyValidator`), then **frozen on the session** as
+`policy_snapshot` / `policy_snapshot_at`. The engine's `resolvePolicy(session)` prefers that
+snapshot, so an admin edit to `config_policies` cannot move an in-flight session's operating
+point; legacy rows created before `V4` have no snapshot and fall back to a live config read.
+
+### `WorkflowPolicyDefaults` (per-workflow operating points)
+The single source of truth for what each user type gets before an operator edits anything —
+shared by the `V4` seed, the `ConfigService` DB-miss fallback and lazily-created rows in
+`ConfigController`, so a missing `config_policies` row can never collapse the three workflows
+onto one operating point:
+
+| Workflow | passiveThreshold | minChallengeCount | challengeTimeoutMs | maxRetryCount | onRepeatedFailure |
+|----------|------------------|-------------------|--------------------|---------------|-------------------|
+| RESIDENT | 0.80 | 1 | 20,000 | 3 | ESCALATE_TO_OPERATOR |
+| OPERATOR | 0.82 | 1 | 15,000 | 2 | FALLBACK |
+| SUPERVISOR | 0.85 | 2 | 15,000 | 1 | LOCK_OUT |
+
+The challenge-window floor is one knob everywhere — `mosip.liveness.min-challenge-window-ms`
+(default 15,000, absolute clamp 1,000): the config API refuses less, `EffectivePolicyValidator`
+refuses to freeze less, and the engine clamps stored values up to it.
 
 **Key config constants:**
 | Constant | Default | Description |
@@ -665,7 +685,8 @@ Record with all fields fully resolved (base + override merged). Passed to each `
 
 ```sql
 liveness_sessions     -- id(UUID), workflow_type, device_id, status, current_stage,
-                       -- retry_count, online, final_result, failure_reason, timestamps
+                       -- retry_count, online, final_result, failure_reason, timestamps,
+                       -- policy_snapshot(TEXT), policy_snapshot_at   (V4)
 
 frame_events          -- id(UUID), session_id(FK), stage, face_detected, multiple_faces,
                        -- face_quality, liveness_score, pad_flag, pad_attack_type, pad_confidence
@@ -685,14 +706,20 @@ Seed data: default policies for RESIDENT, OPERATOR, SUPERVISOR workflows (explic
 literal UUIDs — no `uuid-ossp` extension is required, because Hibernate generates the
 identifier client-side with `@GeneratedValue(strategy = GenerationType.UUID)`).
 
+`V4__session_policy_snapshot.sql` adds `liveness_sessions.policy_snapshot` /
+`policy_snapshot_at` and rewrites the three seeded rows to their distinct
+`WorkflowPolicyDefaults` operating points (see §10). The local audit chain adds
+`config_change_audit` (V7), `audit_logs.workflow_type` + its index (V8) and the
+append-only `UPDATE`/`DELETE` guards on `audit_logs` (V9).
+
 `challenge_types` and `details` are stored as **JSON text**, not `JSONB`: the entities
 map them with explicit JPA `AttributeConverter`s (`models/converter/`) so H2 (dev) and
 PostgreSQL behave identically, and neither column is ever queried with JSON operators.
 The `config_policies` passive-threshold default was unified to `0.80` by
 `V2__unify_passive_threshold.sql` (which also rewrites any seeded `0.75` rows), so the
-DB now matches `LivenessConfig` / `application.yml`. The remaining row defaults
-(`min_challenge_count 1`, `max_retry_count 3`) still differ from the engine's
-`2 / 2` — see §16.
+DB now matches `LivenessConfig` / `application.yml`, and `V4` rewrites the seeded rows to
+their distinct `WorkflowPolicyDefaults` operating points — so `min_challenge_count` /
+`max_retry_count` / `challenge_timeout_ms` are per workflow, not one shared literal.
 
 ---
 
@@ -1021,7 +1048,8 @@ already in use.
 ### Add a New Workflow
 1. Add the value to `WorkflowType` (core + `models.enums`) and to `ConfigService`'s
    `toCoreWorkflow` / `toDbWorkflow` switches
-2. Add a per-workflow override in config if it needs different thresholds
+2. Add its default operating point to `WorkflowPolicyDefaults.forWorkflow` — the `V4`
+   seed, the DB-miss fallback and lazily-created rows all read it
 3. Add a `config_policies` row — either as a migration `INSERT` or by writing to
    `PUT /api/v1/config/{workflowType}` (the controller creates the row on first use)
 
