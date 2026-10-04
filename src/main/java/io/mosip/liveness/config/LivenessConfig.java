@@ -30,7 +30,14 @@ public final class LivenessConfig {
      * was a false-failure source), so watch the challenge failure rate; the
      * per-workflow {@code config_policies} row can override it at runtime.
      */
-    public static final long DEFAULT_CHALLENGE_TIMEOUT_MS = 15_000L;
+    /**
+     * Hard floor for a single active-challenge window. A stored/requested value
+     * below this is clamped to it; a configuration value below it is rejected at
+     * session creation. A window shorter than this reliably times out people who
+     * simply take a moment to read and perform the instruction.
+     */
+    public static final long MIN_CHALLENGE_WINDOW_MS = 15_000L;
+    public static final long DEFAULT_CHALLENGE_TIMEOUT_MS = MIN_CHALLENGE_WINDOW_MS;
     public static final int DEFAULT_MAX_RETRIES = 2;
     public static final RepeatedFailureAction DEFAULT_REPEATED_FAILURE_ACTION = RepeatedFailureAction.LOCK_OUT;
     // v3 defaults

@@ -3,6 +3,7 @@ package io.mosip.liveness.services;
 import io.mosip.liveness.config.EffectivePolicy;
 import io.mosip.liveness.core.ChallengeType;
 import io.mosip.liveness.core.PadVerdict;
+import io.mosip.liveness.core.RepeatedFailureAction;
 import io.mosip.liveness.crud.AuditLogRepository;
 import io.mosip.liveness.crud.ChallengeRepository;
 import io.mosip.liveness.crud.FrameEventRepository;
@@ -52,7 +53,8 @@ public class DecisionEngineService {
      * <p>Lowered from 60s to 15s at the product's request, matching
      * {@link io.mosip.liveness.config.LivenessConfig#DEFAULT_CHALLENGE_TIMEOUT_MS}.</p>
      */
-    public static final long MIN_CHALLENGE_WINDOW_MS = 15_000L;
+    public static final long MIN_CHALLENGE_WINDOW_MS =
+            io.mosip.liveness.config.LivenessConfig.MIN_CHALLENGE_WINDOW_MS;
 
     /**
      * Number of consecutive frames that must agree on a PAD attack before the
@@ -88,9 +90,9 @@ public class DecisionEngineService {
         // while the other issues a challenge.
         LivenessSession session = sessionRepo.findByIdForUpdate(in.getId()).orElse(in);
 
-        // Read effective policy from DB (updates via API take effect immediately)
-        EffectivePolicy policy = configService.getEffectivePolicy(
-                configService.toCoreWorkflow(session.getWorkflowType()));
+        // The session's frozen policy (resolved + validated at creation), or a
+        // live read for legacy sessions created before the snapshot existed.
+        EffectivePolicy policy = resolvePolicy(session);
         double passiveThreshold = policy.passiveThreshold();
 
         // ---- Challenge lock -----------------------------------------------------
@@ -188,6 +190,33 @@ public class DecisionEngineService {
                     .build();
         }
 
+        // ---- Liveness disabled ------------------------------------------------
+        // When a workflow disables liveness, skip only the passive median window
+        // and active challenges. The face-detection gate and the PAD gate above
+        // have already run and stay fail-closed: a confirmed presentation attack
+        // still rejects the session. The bypass is audited (once, on this
+        // terminal transition) so a disabled workflow is never silent.
+        if (!policy.livenessEnabled()) {
+            saveFrameEvent(session, true, false, observation.faceQuality(), null,
+                    false, null, padResult.confidence());
+            session.setFinalResult(true);
+            session.setStatus(SessionStatus.PASSED);
+            session.setCurrentStage(LivenessStage.COMPLETED);
+            session.setClosedAt(OffsetDateTime.now());
+            logAudit(session, "LIVENESS_DISABLED", Map.of(
+                    "via", "policy_disabled",
+                    "padChecked", true));
+            return FrameProcessResult.builder()
+                    .sessionId(session.getId())
+                    .stage(LivenessStage.COMPLETED)
+                    .faceDetected(true)
+                    .faceQuality(observation.faceQuality())
+                    .padFlag(false)
+                    .action("proceed")
+                    .message("Liveness verification is disabled for this workflow.")
+                    .build();
+        }
+
         // Passive liveness score: the MiniFASNet model's live-class confidence
         // when available, the OpenCV quality heuristic otherwise.
         double livenessScore = passiveScorer.score(frame, observation, imageUtils);
@@ -270,6 +299,21 @@ public class DecisionEngineService {
     }
 
     /**
+     * The policy that governs a session: the snapshot frozen at creation when
+     * present, otherwise a live read for legacy rows created before V4. Keeping
+     * the snapshot authoritative means an admin edit to {@code config_policies}
+     * cannot change an in-flight session's operating point.
+     */
+    private EffectivePolicy resolvePolicy(LivenessSession session) {
+        EffectivePolicy snapshot = session.getPolicySnapshot();
+        if (snapshot != null) {
+            return snapshot;
+        }
+        return configService.getEffectivePolicy(
+                configService.toCoreWorkflow(session.getWorkflowType()));
+    }
+
+    /**
      * Combines the heuristic PAD (FFT energy, texture variance, brightness) with
      * the model PAD (MiniFASNet print/replay classes) into one verdict. Either
      * source detecting an attack wins — defence in depth, and the model covers
@@ -323,9 +367,8 @@ public class DecisionEngineService {
         // frame submission deciding on the same session.
         LivenessSession session = sessionRepo.findByIdForUpdate(in.getId()).orElse(in);
 
-        // Read effective policy from DB
-        EffectivePolicy policy = configService.getEffectivePolicy(
-                configService.toCoreWorkflow(session.getWorkflowType()));
+        // The session's frozen policy (see resolvePolicy)
+        EffectivePolicy policy = resolvePolicy(session);
         int maxRetry = policy.maxRetries();
         int minChallengeCount = policy.minChallengeCount();
 
@@ -402,14 +445,48 @@ public class DecisionEngineService {
 
         session.setRetryCount(session.getRetryCount() + 1);
         if (session.getRetryCount() >= maxRetry) {
+            // All three outcomes are terminal — none grants another challenge.
+            // Extra attempts belong in maxRetry, not in the failure action. They
+            // differ only in the outcome signal and whether the client may open a
+            // fresh session.
             session.setStatus(SessionStatus.FAILED);
-            session.setFailureReason("max_retries_exceeded");
             session.setCurrentStage(LivenessStage.COMPLETED);
             session.setClosedAt(OffsetDateTime.now());
+
+            RepeatedFailureAction action = policy.onRepeatedFailure();
+            String failureReason;
+            String clientAction;
+            boolean mayRetrySession;
+            String message;
+            switch (action) {
+                case LOCK_OUT -> {
+                    failureReason = "max_retries_exceeded:locked_out";
+                    clientAction = "locked";
+                    mayRetrySession = false;
+                    message = "Face verification failed. Please contact an operator for assistance.";
+                }
+                case ESCALATE_TO_OPERATOR -> {
+                    failureReason = "max_retries_exceeded:escalation_required";
+                    clientAction = "escalate_to_operator";
+                    mayRetrySession = false;
+                    message = "Face verification could not be completed. An operator will assist you.";
+                }
+                default -> { // FALLBACK (ALLOW_RETRY)
+                    failureReason = "max_retries_exceeded";
+                    clientAction = "failed";
+                    mayRetrySession = true;
+                    message = "We could not verify face liveness. Please try again.";
+                }
+            }
+            session.setFailureReason(failureReason);
+            logAudit(session, "MAX_RETRIES_EXCEEDED", Map.of(
+                    "action", action.name(),
+                    "attempts", session.getRetryCount()));
             return Map.of(
                     "passed", false,
-                    "action", "reject",
-                    "message", "We could not verify face liveness. Please try again.");
+                    "action", clientAction,
+                    "mayRetrySession", mayRetrySession,
+                    "message", message);
         }
 
         return Map.of(

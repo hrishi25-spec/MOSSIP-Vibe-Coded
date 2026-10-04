@@ -159,7 +159,9 @@ frame/challenge endpoint that needs image processing returns **503**.
 ```
 POST /api/v1/sessions
   Body: { "workflowType": "RESIDENT|OPERATOR|SUPERVISOR", "deviceId": "string", "subjectRef": "string?", "online": true }
-  → 201: { id, workflowType, deviceId, status, currentStage, retryCount, ... }
+  → 201: { id, workflowType, deviceId, status, currentStage, retryCount,
+           policy: { passiveThreshold, minChallengeCount, challengeTimeoutMs, maxRetries,
+                     allowedChallenges, onRepeatedFailure, livenessEnabled }, ... }
 
 GET /api/v1/sessions/{sessionId}
   → 200: SessionResponse (full session state)
@@ -175,11 +177,20 @@ POST /api/v1/sessions/{sessionId}/frames
   → FrameProcessResult {
       sessionId, stage, faceDetected, multipleFaces, faceQuality,
       livenessScore, padFlag, padAttackType,
-      action: "proceed" | "escalate_to_active" | "reject" | "retry_passive",
+      action: "proceed" | "escalate_to_active" | "reject" | "retry_passive"
+            | "locked" | "escalate_to_operator" | "failed",
+      mayRetrySession: true|false,      // only on a terminal *failure* action
       challenge: { challengeId, challengeType, timeoutMs, attemptNumber },
       message: "generic user-facing message"
     }
 ```
+
+**Per-user-type policy is frozen at session start.** `createSession` resolves the
+workflow's effective policy via `ConfigService`/`WorkflowPolicyDefaults`, validates
+it (`EffectivePolicyValidator`), and stores it as `policy_snapshot` on the session.
+`DecisionEngineService.resolvePolicy(session)` returns that snapshot (falling back to
+a live read only for legacy rows), so every frame and challenge honours the operating
+point chosen at the start — an admin edit cannot shift an in-flight session.
 
 **Frame submission flow:**
 1. Decodes base64 → OpenCV Mat
@@ -202,6 +213,11 @@ POST /api/v1/sessions/{sessionId}/frames
 8. Once warm: median of the last `passiveWindowFrames` (7) scores ≥
    `passiveThreshold` → `proceed` (session PASSED); below → `escalate_to_active`
    + issue a challenge (or `reject` when active liveness is disabled)
+
+> **Liveness disabled is not PAD disabled.** When a workflow sets
+> `livenessEnabled=false`, step 6/7/8 are skipped and a clean frame passes — but
+> steps 3–4 (face gate + PAD) still run and a confirmed attack still rejects. The
+> bypass is audited once per session as `LIVENESS_DISABLED`.
 
 > **Median over a window, not a single frame.** The HTTP path decides on the
 > median of the last `passiveWindowFrames` scores, and only once at least
@@ -232,7 +248,11 @@ POST /api/v1/sessions/{sessionId}/challenges/validate
    challenge stays `ISSUED`, the session stays `ACTIVE`, and **no retry is consumed**
 5. If the window elapsed without a pass → retry with a different challenge
    (up to `maxRetryCount`)
-6. If retries exhausted → `reject`
+6. If retries exhausted → a **terminal** outcome from `onRepeatedFailure` (none
+   grants another challenge): `LOCK_OUT` → `locked`; `ESCALATE_TO_OPERATOR` →
+   `escalate_to_operator`; `FALLBACK`/`ALLOW_RETRY` → `failed` +
+   `mayRetrySession: true` (client may start a fresh session). Audited as
+   `MAX_RETRIES_EXCEEDED` with the action.
 
 **Challenge window.** A challenge stays open for `challengeTimeoutMs`, with a
 **15-second floor** enforced by the engine regardless of the stored value
@@ -258,13 +278,18 @@ PUT /api/v1/config/{workflowType}
 | Field | Type | Range | Default |
 |-------|------|-------|---------|
 | livenessEnabled | boolean | — | true |
-| passiveThreshold | double | 0.0–1.0 | 0.80 (single source of truth — `LivenessConfig.DEFAULT_PASSIVE_THRESHOLD`, mirrored by the V1/V2 seed, `application.yml` and the DB-miss fallback; calibrate via the sweep endpoint below) |
+| passiveThreshold | double | (0, 1] | per workflow: RESIDENT 0.80, OPERATOR 0.82, SUPERVISOR 0.85 (single source of truth `WorkflowPolicyDefaults`, mirrored by the V4 seed and the DB-miss fallback; calibrate via the sweep endpoint below) |
 | activeLivenessEnabled | boolean | — | true |
-| minChallengeCount | int | ≥ 1 | 1 |
-| challengeTypes | string[] | non-empty | ["blink","smile","turn_left","turn_right"] |
-| challengeTimeoutMs | int | ≥ 1000 (15 000 floor applied at runtime) | 15000 |
-| maxRetryCount | int | ≥ 0 | 3 |
-| onRepeatedFailure | string | LOCK\|ESCALATE\|ALLOW_RETRY | LOCK |### Metrics
+| minChallengeCount | int | ≥ 1 and ≤ challengeTypes.length | per workflow: RESIDENT 1, OPERATOR 1, SUPERVISOR 2 |
+| challengeTypes | string[] | non-empty | per workflow (see `WorkflowPolicyDefaults`) |
+| challengeTimeoutMs | int | ≥ 15000 (`LivenessConfig.MIN_CHALLENGE_WINDOW_MS`, enforced at create + update) | per workflow: RESIDENT 20000, OPERATOR/SUPERVISOR 15000 |
+| maxRetryCount | int | ≥ 0 | per workflow: RESIDENT 3, OPERATOR 2, SUPERVISOR 1 |
+| onRepeatedFailure | string | LOCK\|ESCALATE\|ALLOW_RETRY | per workflow: RESIDENT ESCALATE, OPERATOR ALLOW_RETRY, SUPERVISOR LOCK |
+
+`GET/PUT /api/v1/config/{workflowType}` is keyed by user type — this is the
+mechanism behind "different workflow, different threshold per resident/operator/supervisor".
+
+### Metrics
 ```
 GET /api/v1/metrics
   → OperationalMetrics { totalSessions, passedSessions, failedSessions, activeSessions, passRate, avgPassiveToActiveEscalationRate,
@@ -614,7 +639,13 @@ Base configuration with all defaults. Created once at startup. Supports per-work
 Every field is nullable (null = inherit from base). Applied via `LivenessConfig.effectivePolicy(workflow)`.
 
 ### `EffectivePolicy` (resolved for one session)
-Record with all fields fully resolved (base + override merged). Passed to each `LivenessSession`.
+Record with all fields fully resolved (base + override merged). Passed to each `LivenessSession`, and **frozen on the session** as `policy_snapshot` at creation.
+
+### `WorkflowPolicyDefaults` (per-user-type defaults)
+Single source of truth for each workflow's default operating point — `RESIDENT` (0.80 / 1 / 20s / 3 / `ESCALATE_TO_OPERATOR`), `OPERATOR` (0.82 / 1 / 15s / 2 / `FALLBACK`), `SUPERVISOR` (0.85 / 2 / 15s / 1 / `LOCK_OUT`). Used by the V4 seed, the `ConfigService` DB-miss fallback and `ConfigController`'s lazy-create path, so those three can never disagree.
+
+### `EffectivePolicyValidator`
+Cross-field validation run at session creation (before freezing the snapshot) and on every config `PUT`: `passiveThreshold` ∈ (0,1], `minChallengeCount` ≤ challenge-type pool, `challengeTimeoutMs` ≥ floor, `maxRetries` ≥ 0. Violations are HTTP 400.
 
 **Key config constants:**
 | Constant | Default | Description |
@@ -624,7 +655,8 @@ Record with all fields fully resolved (base + override merged). Passed to each `
 | `DEFAULT_PASSIVE_MIN_FRAMES` | 5 | Min frames before passive decision |
 | `DEFAULT_PASSIVE_WINDOW_FRAMES` | 7 | Sliding window size |
 | `DEFAULT_MIN_CHALLENGE_COUNT` | 2 | Challenges required to pass |
-| `DEFAULT_CHALLENGE_TIMEOUT_MS` | 15,000 | Per-challenge window (15s floor) |
+| `MIN_CHALLENGE_WINDOW_MS` | 15,000 | Hard floor for a challenge window (clamped at runtime, rejected at create/update) |
+| `DEFAULT_CHALLENGE_TIMEOUT_MS` | 15,000 | Per-challenge window default (= `MIN_CHALLENGE_WINDOW_MS`) |
 | `DEFAULT_MAX_RETRIES` | 2 | Retries before hard fail |
 | `DEFAULT_MAX_SESSION_DURATION_MS` | 30,000 | Total session timeout |
 | `DEFAULT_FRAME_SAMPLING_RATE` | 1 | Process every frame (production: 2) |
@@ -640,7 +672,8 @@ Record with all fields fully resolved (base + override merged). Passed to each `
 
 ```sql
 liveness_sessions     -- id(UUID), workflow_type, device_id, status, current_stage,
-                       -- retry_count, online, final_result, failure_reason, timestamps
+                       -- retry_count, online, final_result, failure_reason, timestamps,
+                       -- policy_snapshot(TEXT), policy_snapshot_at  (V4)
 
 frame_events          -- id(UUID), session_id(FK), stage, face_detected, multiple_faces,
                        -- face_quality, liveness_score, pad_flag, pad_attack_type, pad_confidence
@@ -658,15 +691,15 @@ audit_logs            -- id(UUID), session_id(FK), event_type, details(TEXT), cr
 Seed data: default policies for RESIDENT, OPERATOR, SUPERVISOR workflows (explicit
 literal UUIDs — no `uuid-ossp` extension is required, because Hibernate generates the
 identifier client-side with `@GeneratedValue(strategy = GenerationType.UUID)`).
+`V4__session_policy_snapshot.sql` adds `liveness_sessions.policy_snapshot` /
+`policy_snapshot_at` and rewrites the three seeded rows to their distinct
+`WorkflowPolicyDefaults` operating points (see §10).
 
 `challenge_types` and `details` are stored as **JSON text**, not `JSONB`: the entities
 map them with explicit JPA `AttributeConverter`s (`models/converter/`) so H2 (dev) and
 PostgreSQL behave identically, and neither column is ever queried with JSON operators.
-The `config_policies` passive-threshold default was unified to `0.80` by
-`V2__unify_passive_threshold.sql` (which also rewrites any seeded `0.75` rows), so the
-DB now matches `LivenessConfig` / `application.yml`. The remaining row defaults
-(`min_challenge_count 1`, `max_retry_count 3`) still differ from the engine's
-`2 / 2` — see §16.
+The `config_policies` thresholds now differ **per workflow** (V4): 0.80 / 0.82 /
+0.85 for RESIDENT / OPERATOR / SUPERVISOR, matching `WorkflowPolicyDefaults`.
 
 ---
 
@@ -995,9 +1028,10 @@ already in use.
 ### Add a New Workflow
 1. Add the value to `WorkflowType` (core + `models.enums`) and to `ConfigService`'s
    `toCoreWorkflow` / `toDbWorkflow` switches
-2. Add a per-workflow override in config if it needs different thresholds
-3. Add a `config_policies` row — either as a migration `INSERT` or by writing to
-   `PUT /api/v1/config/{workflowType}` (the controller creates the row on first use)
+2. Add its default operating point to `WorkflowPolicyDefaults.forWorkflow` — this is
+   the single source of truth used by the seed, the DB-miss fallback and lazy creation
+3. Add a `config_policies` row — a migration `INSERT` mirroring step 2, or just let
+   `PUT /api/v1/config/{workflowType}` create it on first use
 
 ### Integrate with Real Device
 1. Implement `DeviceAdapter` for the vendor SDK

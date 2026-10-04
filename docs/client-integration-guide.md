@@ -519,6 +519,46 @@ curl -X PUT localhost:8000/api/v1/config/OPERATOR \
   }'
 ```
 
+### 5.3 The user type is chosen at session start, and the policy is frozen
+
+Send the user type once, in the create-session call. The response carries the
+**resolved policy that will govern the whole session** (threshold, challenge pool,
+window, retry budget, repeated-failure action). Do not assume the defaults are the
+same across user types — they are not, and they can be edited at runtime.
+
+```jsonc
+POST /api/v1/sessions  { "workflowType": "SUPERVISOR", "deviceId": "L1-CAM-01" }
+// 201 →
+{
+  "id": "…", "workflowType": "SUPERVISOR", "status": "ACTIVE",
+  "policy": {
+    "passiveThreshold": 0.85, "minChallengeCount": 2,
+    "challengeTimeoutMs": 15000, "maxRetries": 1,
+    "allowedChallenges": ["BLINK","SMILE","TURN_HEAD_LEFT","TURN_HEAD_RIGHT"],
+    "onRepeatedFailure": "LOCK_OUT", "livenessEnabled": true
+  }
+}
+```
+
+The policy is frozen on the session at creation: a later `PUT /api/v1/config/{wf}`
+affects only **new** sessions, never one already running. Surface the user type and
+(optionally) the resolved policy in the UI so the operator knows which flow is active.
+
+### 5.4 Terminal outcomes and `mayRetrySession`
+
+When a session ends, read `action`:
+
+| `action` | Meaning | Client action |
+|----------|---------|---------------|
+| `proceed` | Liveness verified | Continue the capture/auth |
+| `reject` | PAD attack or liveness failed | Show the generic failure message |
+| `locked` | Retry budget exhausted, `LOCK_OUT` | Stop; direct to support |
+| `escalate_to_operator` | Retry budget exhausted, `ESCALATE_TO_OPERATOR` | Route the subject to an operator |
+| `failed` | Retry budget exhausted, `ALLOW_RETRY` | May start a **new** session (`mayRetrySession: true`) |
+
+`mayRetrySession` is `false`/absent for `locked` and `escalate_to_operator`. A
+failure action **never** issues another challenge in the same session.
+
 ---
 
 ## 6. Error Handling

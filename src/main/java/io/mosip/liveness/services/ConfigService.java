@@ -2,6 +2,7 @@ package io.mosip.liveness.services;
 
 import io.mosip.liveness.config.EffectivePolicy;
 import io.mosip.liveness.config.LivenessConfig;
+import io.mosip.liveness.config.WorkflowPolicyDefaults;
 import io.mosip.liveness.core.ChallengeType;
 import io.mosip.liveness.core.RepeatedFailureAction;
 import io.mosip.liveness.core.WorkflowType;
@@ -56,7 +57,10 @@ public class ConfigService {
     public EffectivePolicy getEffectivePolicy(WorkflowType workflow) {
         ConfigPolicy db = configRepo.findByWorkflowType(toDbWorkflow(workflow)).orElse(null);
         if (db == null) {
-            return defaultEffectivePolicy();
+            // No row yet: use the workflow's own defaults, never one global
+            // fallback — the whole point of the three workflows is that their
+            // operating points differ even before an operator edits them.
+            return WorkflowPolicyDefaults.forWorkflow(workflow);
         }
         return mapToEffectivePolicy(db);
     }
@@ -158,20 +162,13 @@ public class ConfigService {
         };
     }
 
-    private EffectivePolicy defaultEffectivePolicy() {
-        return new EffectivePolicy(
-                true, true, DEFAULT_PASSIVE_THRESHOLD, DEFAULT_MIN_FACE_QUALITY,
-                DEFAULT_PASSIVE_MIN_FRAMES, DEFAULT_PASSIVE_WINDOW_FRAMES,
-                1, 3, DEFAULT_CHALLENGE_TIMEOUT_MS,
-                EnumSet.of(ChallengeType.BLINK, ChallengeType.SMILE,
-                        ChallengeType.TURN_HEAD_LEFT, ChallengeType.TURN_HEAD_RIGHT),
-                RepeatedFailureAction.LOCK_OUT,
-                // v3 fields
-                -1.0,   // passiveThresholdActive
-                30000L, // maxSessionDurationMs
-                1,      // frameSamplingRate
-                10,     // frameSamplingMinFps
-                0.6,    // combinedPassiveWeight
-                0.4);   // combinedActiveWeight
+    /** Convert the engine's repeated-failure action to the DB/API enum. */
+    public FailurePolicy toDbFailure(RepeatedFailureAction action) {
+        if (action == null) return FailurePolicy.LOCK;
+        return switch (action) {
+            case LOCK_OUT -> FailurePolicy.LOCK;
+            case ESCALATE_TO_OPERATOR -> FailurePolicy.ESCALATE;
+            case FALLBACK -> FailurePolicy.ALLOW_RETRY;
+        };
     }
 }

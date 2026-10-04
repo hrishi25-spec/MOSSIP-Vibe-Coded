@@ -323,6 +323,55 @@ class DecisionEngineServicePassiveFlowTest {
         assertNotEquals(LivenessStage.ACTIVE, session.getCurrentStage());
     }
 
+    /** A workflow with liveness disabled but PAD still enforced. */
+    private EffectivePolicy livenessDisabledPolicy() {
+        return new EffectivePolicy(false, true, THRESHOLD, 0.50, MIN_FRAMES, WINDOW_FRAMES,
+                1, 3, 60_000L, EnumSet.of(ChallengeType.BLINK), RepeatedFailureAction.LOCK_OUT,
+                -1.0, 30_000L, 1, 10, 0.6, 0.4);
+    }
+
+    @Test
+    void frozenSnapshotGovernsTheSessionEvenWhenLiveConfigDiffers() {
+        // Live config says 0.80 (0.90 would pass); the frozen snapshot says 0.95.
+        session.setPolicySnapshot(new EffectivePolicy(true, true, 0.95, 0.50,
+                MIN_FRAMES, WINDOW_FRAMES, 1, 3, 60_000L,
+                EnumSet.of(ChallengeType.BLINK), RepeatedFailureAction.LOCK_OUT,
+                -1.0, 30_000L, 1, 10, 0.6, 0.4));
+        nextScore = 0.90;
+
+        FrameProcessResult r = pushFrame();
+        for (int i = 1; i < MIN_FRAMES; i++) r = pushFrame();
+
+        assertEquals("escalate_to_active", r.getAction(),
+                "the snapshot threshold (0.95), not the live one (0.80), must decide");
+    }
+
+    @Test
+    void disabledLivenessPassesWithoutScoring() {
+        when(configService.getEffectivePolicy(any())).thenReturn(livenessDisabledPolicy());
+        nextScore = 0.01;   // would fail any liveness threshold
+
+        FrameProcessResult r = pushFrame();
+
+        assertEquals("proceed", r.getAction());
+        assertEquals(SessionStatus.PASSED, session.getStatus());
+        assertEquals(LivenessStage.COMPLETED, session.getCurrentStage());
+        verify(passiveScorer, never()).score(any(), any(), any());
+    }
+
+    @Test
+    void disabledLivenessStillRejectsAConfirmedPresentationAttack() {
+        when(configService.getEffectivePolicy(any())).thenReturn(livenessDisabledPolicy());
+        when(padEngine.detect(any(Mat.class), any()))
+                .thenReturn(PadVerdict.attack(PadAttackType.SCREEN_REPLAY, 0.97));
+
+        FrameProcessResult r = pushFrame();
+
+        assertEquals("reject", r.getAction(),
+                "disabling liveness must never disable PAD");
+        assertEquals(SessionStatus.FAILED, session.getStatus());
+    }
+
     private ChallengeEntity challenge(ChallengeStatus status) {
         return ChallengeEntity.builder()
                 .id(UUID.randomUUID())

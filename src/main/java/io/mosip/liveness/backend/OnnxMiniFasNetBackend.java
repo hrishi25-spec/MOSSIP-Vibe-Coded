@@ -20,6 +20,9 @@ import org.opencv.core.Scalar;
 import org.opencv.imgproc.Imgproc;
 import org.opencv.objdetect.CascadeClassifier;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -96,6 +99,19 @@ public final class OnnxMiniFasNetBackend implements LivenessBackend {
     private static final int CLASS_PRINT = 0;
     private static final int CLASS_LIVE = 1;
     private static final int CLASS_REPLAY = 2;
+
+    /**
+     * TEMPORARY DIAGNOSTIC (score-saturation investigation). When the system
+     * property or environment variable {@code mosip.liveness.diagnostic} is
+     * true, every inference logs its raw logits and the full
+     * [print, live, replay] softmax vector, so a score pegged at 1.000 can be
+     * classified as "confident" vs "saturated/degenerate". Off by default;
+     * remove once the question is resolved.
+     */
+    private static final boolean DIAGNOSTIC = Boolean.parseBoolean(
+            System.getProperty("mosip.liveness.diagnostic",
+                    System.getenv().getOrDefault("MOSIP_LIVENESS_DIAGNOSTIC", "false")));
+    private static final Logger log = LoggerFactory.getLogger(OnnxMiniFasNetBackend.class);
 
     private OrtEnvironment env;
     private OrtSession session;
@@ -317,6 +333,13 @@ public final class OnnxMiniFasNetBackend implements LivenessBackend {
                     // float[][]; flatten whatever nesting the model uses rather
                     // than assuming a flat float[].
                     float[] logits = flatten(result.get(0).getValue());
+                    if (DIAGNOSTIC) {
+                        double[] probs = softmax(logits);
+                        log.info("MINIFASNET[diag] logits={} print={} live={} replay={}",
+                                java.util.Arrays.toString(logits),
+                                probs[CLASS_PRINT], probs[CLASS_LIVE], probs[CLASS_REPLAY]);
+                        return probs;
+                    }
                     return softmax(logits);
                 }
             }

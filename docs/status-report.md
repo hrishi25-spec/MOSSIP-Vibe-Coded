@@ -46,6 +46,8 @@ Device Layer:
 | Facial action validation (blink EAR, smile, head yaw ±12°, gaze tolerance) | ✅ `challenge.ChallengeEvaluators` |
 | PAD terminal-blocking with attack-type taxonomy (print/screen/video) | ✅ `backend.*`, `core.PadVerdict` |
 | Config: thresholds, min challenges, timeout, retries, per-workflow overrides, repeated-failure policy | ✅ `config.LivenessConfig` + `EffectivePolicy` |
+| User type taken at session start; per-workflow threshold/challenge/retry policy **frozen on the session** and validated before use | ✅ `WorkflowPolicyDefaults`, `EffectivePolicyValidator`, `policy_snapshot` (V4) |
+| Distinct resident / operator / supervisor behaviour (incl. real `LOCK`/`ESCALATE`/`ALLOW_RETRY` outcomes) | ✅ `DecisionEngineService` + `V4__session_policy_snapshot.sql` |
 | Error handling codes (face not detected, multiple faces, poor quality, engine errors) | ✅ `core.LivenessErrorCode`, retryable vs terminal distinction |
 | Audit & diagnostic logging (no PII) + anonymized metrics | ✅ `audit.StructuredAuditLogger`, `MetricsCollector` |
 | ISO/IEC 30107 alignment (APCER/BPCER/ACER + evaluation harness) | ✅ `eval.PadMetrics`, `eval.AttackScenarioHarness` |

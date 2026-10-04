@@ -6,6 +6,7 @@ import io.mosip.liveness.models.entity.ConfigPolicy;
 import io.mosip.liveness.models.enums.FailurePolicy;
 import io.mosip.liveness.models.enums.WorkflowType;
 import io.mosip.liveness.crud.ConfigPolicyRepository;
+import io.mosip.liveness.services.ConfigService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -31,17 +32,26 @@ class ConfigControllerTest {
     @Autowired private MockMvc mockMvc;
     @Autowired private ObjectMapper objectMapper;
     @Autowired private ConfigPolicyRepository configRepo;
+    @Autowired private ConfigService configService;
 
     private ConfigPolicy policy;
 
     @BeforeEach
     void setUp() {
-        reset(configRepo);
+        reset(configRepo, configService);
+        // ConfigController delegates enum conversion and effective-policy mapping
+        // to ConfigService; run the real (dependency-free) methods so lazily-seeded
+        // defaults and the merged-policy validation behave as in production.
+        when(configService.toCoreWorkflow(any())).thenCallRealMethod();
+        when(configService.toDbWorkflow(any())).thenCallRealMethod();
+        when(configService.toDbChallenge(any())).thenCallRealMethod();
+        when(configService.toDbFailure(any())).thenCallRealMethod();
+        when(configService.mapToEffectivePolicy(any())).thenCallRealMethod();
         policy = ConfigPolicy.builder()
                 .id(UUID.randomUUID()).workflowType(WorkflowType.RESIDENT)
                 .livenessEnabled(true).passiveThreshold(0.75).activeLivenessEnabled(true)
                 .minChallengeCount(1).challengeTypes(List.of("blink","smile","turn_left","turn_right"))
-                .challengeTimeoutMs(8000).maxRetryCount(3).onRepeatedFailure(FailurePolicy.LOCK)
+                .challengeTimeoutMs(15000).maxRetryCount(3).onRepeatedFailure(FailurePolicy.LOCK)
                 .updatedAt(OffsetDateTime.now()).build();
     }
 
@@ -64,11 +74,10 @@ class ConfigControllerTest {
         });
         mockMvc.perform(get("/api/v1/config/OPERATOR"))
                 .andExpect(status().isOk())
-                // Seeded rows must carry the single source-of-truth default
-                // (LivenessConfig.DEFAULT_PASSIVE_THRESHOLD = 0.80), not a
-                // private 0.75 literal — see docs/configuration.md.
-                .andExpect(jsonPath("$.passiveThreshold")
-                        .value(io.mosip.liveness.config.LivenessConfig.DEFAULT_PASSIVE_THRESHOLD));
+                // A lazily-seeded row carries the workflow's own default
+                // (WorkflowPolicyDefaults): OPERATOR = 0.82, not the shared 0.80.
+                .andExpect(jsonPath("$.passiveThreshold").value(0.82))
+                .andExpect(jsonPath("$.onRepeatedFailure").value("ALLOW_RETRY"));
         verify(configRepo).save(any());
     }
 

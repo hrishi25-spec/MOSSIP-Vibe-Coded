@@ -27,6 +27,7 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -115,10 +116,55 @@ class DecisionEngineServiceTest {
     }
 
     private EffectivePolicy policy(int minChallengeCount, int maxRetries) {
+        return policy(minChallengeCount, maxRetries, RepeatedFailureAction.LOCK_OUT);
+    }
+
+    private EffectivePolicy policy(int minChallengeCount, int maxRetries,
+                                   RepeatedFailureAction onRepeatedFailure) {
         return new EffectivePolicy(true, true, 0.80, 0.50, 5, 7,
                 minChallengeCount, maxRetries, 60_000L,
-                EnumSet.of(ChallengeType.TURN_HEAD_LEFT), RepeatedFailureAction.LOCK_OUT,
+                EnumSet.of(ChallengeType.TURN_HEAD_LEFT), onRepeatedFailure,
                 -1.0, 30_000L, 1, 10, 0.6, 0.4);
+    }
+
+    /** Exhaust the retry budget (maxRetries=1) and return the terminal verdict. */
+    private Map<String, Object> exhaustRetries(RepeatedFailureAction action) {
+        challenge.setIssuedAt(OffsetDateTime.now().minusSeconds(61));
+        when(configService.getEffectivePolicy(any())).thenReturn(policy(1, 1, action));
+        when(livenessEngine.validateActive(eq(DB_TURN_LEFT), anyList(), any())).thenReturn(false);
+        return service.processChallengeValidation(session, challenge, frames, imageUtils);
+    }
+
+    @Test
+    void lockOutOnRetryExhaustionIsTerminalAndNotRetryable() {
+        Map<String, Object> result = exhaustRetries(RepeatedFailureAction.LOCK_OUT);
+
+        assertEquals("locked", result.get("action"));
+        assertEquals(Boolean.FALSE, result.get("mayRetrySession"));
+        assertEquals("max_retries_exceeded:locked_out", session.getFailureReason());
+        assertEquals(SessionStatus.FAILED, session.getStatus());
+        assertNull(result.get("challenge"), "a failure action must never grant a challenge");
+    }
+
+    @Test
+    void escalateOnRetryExhaustionSignalsTheOperatorAndDoesNotRetry() {
+        Map<String, Object> result = exhaustRetries(RepeatedFailureAction.ESCALATE_TO_OPERATOR);
+
+        assertEquals("escalate_to_operator", result.get("action"));
+        assertEquals(Boolean.FALSE, result.get("mayRetrySession"));
+        assertEquals("max_retries_exceeded:escalation_required", session.getFailureReason());
+        assertNull(result.get("challenge"));
+    }
+
+    @Test
+    void allowRetryOnRetryExhaustionFailsButPermitsAFreshSession() {
+        Map<String, Object> result = exhaustRetries(RepeatedFailureAction.FALLBACK);
+
+        assertEquals("failed", result.get("action"));
+        assertEquals(Boolean.TRUE, result.get("mayRetrySession"));
+        assertEquals("max_retries_exceeded", session.getFailureReason());
+        assertEquals(SessionStatus.FAILED, session.getStatus());
+        assertNull(result.get("challenge"));
     }
 
     @Test
@@ -198,6 +244,22 @@ class DecisionEngineServiceTest {
         assertNotNull(challenge.getCompletedAt());
         assertEquals(SessionStatus.PASSED, session.getStatus());
         assertEquals(0, session.getRetryCount());
+    }
+
+    @Test
+    void twoChallengeWorkflowNeedsASecondChallengeBeforeProceeding() {
+        // Supervisor default: minChallengeCount = 2. The first challenge passing
+        // must ask for another, not complete the session.
+        when(configService.getEffectivePolicy(any())).thenReturn(policy(2, 2));
+        when(livenessEngine.validateActive(eq(DB_TURN_LEFT), anyList(), any())).thenReturn(true);
+        when(challengeRepo.countBySessionIdAndStatus(any(), any())).thenReturn(1L);
+
+        Map<String, Object> result =
+                service.processChallengeValidation(session, challenge, frames, imageUtils);
+
+        assertEquals("retry_challenge", result.get("action"));
+        assertNotNull(result.get("challenge"), "a second challenge must be issued");
+        assertNotEquals(SessionStatus.PASSED, session.getStatus());
     }
 
     @Test

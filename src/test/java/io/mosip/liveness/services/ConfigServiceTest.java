@@ -15,6 +15,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -114,6 +115,46 @@ class ConfigServiceTest {
         assertEquals(io.mosip.liveness.config.LivenessConfig.DEFAULT_PASSIVE_THRESHOLD,
                 defaults.passiveThreshold(), 1e-9);
         assertEquals(0.80, defaults.passiveThreshold(), 1e-9);
+    }
+
+    @Test
+    void eachWorkflowFallsBackToItsOwnDistinctDefault() {
+        // The three workflows must not collapse onto one operating point when a
+        // config row is missing — that is the whole point of taking the user type
+        // at session start.
+        ConfigPolicyRepository repo = mock(ConfigPolicyRepository.class);
+        when(repo.findByWorkflowType(any())).thenReturn(Optional.empty());
+        ConfigService svc = new ConfigService(repo);
+
+        EffectivePolicy resident = svc.getEffectivePolicy(WorkflowType.RESIDENT_REGISTRATION);
+        EffectivePolicy operator = svc.getEffectivePolicy(WorkflowType.OPERATOR_AUTH);
+        EffectivePolicy supervisor = svc.getEffectivePolicy(WorkflowType.SUPERVISOR_AUTH);
+
+        assertEquals(0.80, resident.passiveThreshold(), 1e-9);
+        assertEquals(0.82, operator.passiveThreshold(), 1e-9);
+        assertEquals(0.85, supervisor.passiveThreshold(), 1e-9);
+
+        assertEquals(io.mosip.liveness.core.RepeatedFailureAction.ESCALATE_TO_OPERATOR,
+                resident.onRepeatedFailure());
+        assertEquals(io.mosip.liveness.core.RepeatedFailureAction.FALLBACK,
+                operator.onRepeatedFailure());
+        assertEquals(io.mosip.liveness.core.RepeatedFailureAction.LOCK_OUT,
+                supervisor.onRepeatedFailure());
+
+        assertEquals(2, supervisor.minChallengeCount());
+        assertNotEquals(resident.minChallengeCount(), supervisor.minChallengeCount());
+    }
+
+    @Test
+    void failureActionConversionsRoundTrip() {
+        for (io.mosip.liveness.core.RepeatedFailureAction core
+                : io.mosip.liveness.core.RepeatedFailureAction.values()) {
+            ConfigPolicy row = ConfigPolicy.builder()
+                    .onRepeatedFailure(service.toDbFailure(core))
+                    .build();
+            assertEquals(core, service.mapToEffectivePolicy(row).onRepeatedFailure(),
+                    "round trip failed for " + core);
+        }
     }
 
     @Test

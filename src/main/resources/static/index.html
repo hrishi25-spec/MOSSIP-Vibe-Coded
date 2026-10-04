@@ -291,6 +291,14 @@
       $("pill-session").textContent = "session " + sessionId.slice(0, 8);
       $("pill-session").className = "pill ok";
       log(`Session created: ${sessionId}\n  workflow=${session.workflowType} status=${session.status}`);
+      if (session.policy) {
+        const p = session.policy;
+        log(`  resolved policy (frozen for this session):\n`
+          + `  threshold=${p.passiveThreshold} challenges=[${(p.allowedChallenges || []).join(", ")}]`
+          + ` minChallenges=${p.minChallengeCount} timeout=${p.challengeTimeoutMs}ms`
+          + ` maxRetries=${p.maxRetries} onFailure=${p.onRepeatedFailure}`
+          + ` liveness=${p.livenessEnabled ? "on" : "OFF"}`);
+      }
       setStep(1, "done");
 
       // 2 — passive
@@ -313,7 +321,11 @@
           + (r.padAttackType ? ` pad=${r.padAttackType}` : ""));
 
         if (r.action === "escalate_to_active") { escalated = r; break; }
-        if (r.action === "proceed" || r.action === "reject") { outcome = r; break; }
+        // proceed passes; every other terminal action ends the session (reject,
+        // failed/locked on retry exhaustion, or escalated to an operator).
+        if (["proceed", "reject", "failed", "locked", "escalate_to_operator"].includes(r.action)) {
+          outcome = r; break;
+        }
         await sleep(350);
       }
 
@@ -330,6 +342,13 @@
         setStep(4, "active");
         if (outcome && outcome.action === "proceed") {
           verdict("proceed", "PROCEED", outcome.message || "Liveness verified.");
+        } else if (outcome && outcome.action === "escalate_to_operator") {
+          verdict("escalate", "ESCALATE TO OPERATOR",
+            outcome.message || "An operator will assist you.");
+        } else if (outcome && (outcome.action === "locked" || outcome.action === "failed")) {
+          verdict("reject", outcome.action === "locked" ? "LOCKED" : "FAILED",
+            outcome.message || "Liveness could not be verified."
+            + (outcome.mayRetrySession ? " You may start a new session." : ""));
         } else if (outcome) {
           verdict("reject", "REJECT", outcome.message || "Liveness could not be verified.");
         } else {
@@ -418,8 +437,8 @@
 
       if (!running) return { action: null, message: "Stopped by user." };
       if (!outcome) return { action: null, message: "Challenge window elapsed without a verdict." };
-      if (outcome.action === "proceed" || outcome.action === "reject") {
-        return { action: outcome.action, message: outcome.message };
+      if (["proceed", "reject", "failed", "locked", "escalate_to_operator"].includes(outcome.action)) {
+        return outcome;
       }
       // retry_challenge — the response carries the next challenge
       challenge = outcome.challenge;

@@ -1,6 +1,9 @@
 package io.mosip.liveness.api;
 
 import io.mosip.liveness.config.EffectivePolicy;
+import io.mosip.liveness.config.EffectivePolicyValidator;
+import io.mosip.liveness.config.LivenessConfig;
+import io.mosip.liveness.config.WorkflowPolicyDefaults;
 import io.mosip.liveness.dto.ConfigPolicyResponse;
 import io.mosip.liveness.dto.ConfigPolicyUpdate;
 import io.mosip.liveness.models.entity.ConfigPolicy;
@@ -66,23 +69,28 @@ public class ConfigController {
             policy.setOnRepeatedFailure(FailurePolicy.valueOf(update.getOnRepeatedFailure()));
         }
 
+        // Cross-field invariants on the merged row: a per-field check cannot see
+        // that e.g. minChallengeCount now exceeds the challenge-type pool.
+        EffectivePolicyValidator.validate(configService.mapToEffectivePolicy(policy));
+
         configRepo.save(policy);
         return toResponse(policy);
     }
 
     private void validate(ConfigPolicyUpdate update) {
         if (update.getPassiveThreshold() != null &&
-                (update.getPassiveThreshold() < 0.0 || update.getPassiveThreshold() > 1.0)) {
+                (update.getPassiveThreshold() <= 0.0 || update.getPassiveThreshold() > 1.0)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "passiveThreshold must be between 0.0 and 1.0");
+                    "passiveThreshold must be greater than 0.0 and at most 1.0");
         }
         if (update.getMinChallengeCount() != null && update.getMinChallengeCount() < 1) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "minChallengeCount must be >= 1");
         }
-        if (update.getChallengeTimeoutMs() != null && update.getChallengeTimeoutMs() < 1000) {
+        if (update.getChallengeTimeoutMs() != null
+                && update.getChallengeTimeoutMs() < LivenessConfig.MIN_CHALLENGE_WINDOW_MS) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "challengeTimeoutMs must be >= 1000");
+                    "challengeTimeoutMs must be >= " + LivenessConfig.MIN_CHALLENGE_WINDOW_MS);
         }
         if (update.getMaxRetryCount() != null && update.getMaxRetryCount() < 0) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
@@ -104,16 +112,24 @@ public class ConfigController {
 
     private ConfigPolicy getOrCreatePolicy(WorkflowType workflowType) {
         return configRepo.findByWorkflowType(workflowType).orElseGet(() -> {
+            // Seed the row from the workflow's own defaults (WorkflowPolicyDefaults),
+            // the same source V4 uses — so a lazily-created row is identical to a
+            // migrated one instead of silently collapsing all three workflows onto
+            // one operating point.
+            EffectivePolicy defaults = WorkflowPolicyDefaults.forWorkflow(
+                    configService.toCoreWorkflow(workflowType));
             ConfigPolicy policy = ConfigPolicy.builder()
                     .workflowType(workflowType)
-                    .livenessEnabled(true)
-                    .passiveThreshold(io.mosip.liveness.config.LivenessConfig.DEFAULT_PASSIVE_THRESHOLD)
-                    .activeLivenessEnabled(true)
-                    .minChallengeCount(1)
-                    .challengeTypes(List.of("blink", "smile", "turn_left", "turn_right"))
-                    .challengeTimeoutMs((int) io.mosip.liveness.config.LivenessConfig.DEFAULT_CHALLENGE_TIMEOUT_MS)
-                    .maxRetryCount(3)
-                    .onRepeatedFailure(FailurePolicy.LOCK)
+                    .livenessEnabled(defaults.livenessEnabled())
+                    .passiveThreshold(defaults.passiveThreshold())
+                    .activeLivenessEnabled(defaults.activeLivenessEnabled())
+                    .minChallengeCount(defaults.minChallengeCount())
+                    .challengeTypes(defaults.allowedChallenges().stream()
+                            .map(c -> configService.toDbChallenge(c).name().toLowerCase())
+                            .toList())
+                    .challengeTimeoutMs((int) defaults.challengeTimeoutMs())
+                    .maxRetryCount(defaults.maxRetries())
+                    .onRepeatedFailure(configService.toDbFailure(defaults.onRepeatedFailure()))
                     .build();
             return configRepo.save(policy);
         });
