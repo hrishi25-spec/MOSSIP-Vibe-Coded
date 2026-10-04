@@ -6,7 +6,7 @@ Built via `LivenessConfig.builder()`:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `livenessEnabled` | boolean | `true` | Enable/disable liveness verification entirely. When disabled, sessions bypass scoring and return PASSED immediately. |
+| `livenessEnabled` | boolean | `true` | Enable/disable liveness verification. When disabled, passive scoring and active challenges are skipped, but the face-detection gate and **PAD stay fail-closed** — a confirmed presentation attack still rejects. Every bypassing session is audited as `LIVENESS_DISABLED`. |
 | `activeLivenessEnabled` | boolean | `true` | Enable/disable active (Stage 2) liveness. When disabled and passive fails, session hard-fails instead of escalating. |
 | `passiveThreshold` | double | `0.80` | Liveness confidence threshold in [0, 1]. Median score ≥ threshold → proceed; < threshold → escalate (or fail). |
 | `minFaceQuality` | double | `0.50` | Minimum face quality score in [0, 1]. Frames below this are rejected as RETRYABLE_ERROR. |
@@ -21,13 +21,17 @@ Built via `LivenessConfig.builder()`:
 
 ### Validation Rules
 
-- `passiveThreshold` ∈ [0, 1]
+Validated by `EffectivePolicyValidator` at **session creation** (the frozen
+snapshot must be valid before it is persisted) and on every
+`PUT /api/v1/config/{workflowType}`. A violation is a 400.
+
+- `passiveThreshold` ∈ **(0, 1]** — a threshold of exactly 0 would pass every frame
 - `minFaceQuality` ∈ [0, 1]
 - `passiveMinFrames` ≥ 1
 - `passiveWindowFrames` ≥ `passiveMinFrames`
-- `minChallengeCount` ≥ 1
+- `minChallengeCount` ≥ 1 (and **≤ the number of configured challenge types** when active liveness is on)
 - `maxRetries` ≥ 0
-- `challengeTimeoutMs` > 0
+- `challengeTimeoutMs` ≥ `LivenessConfig.MIN_CHALLENGE_WINDOW_MS` (**15,000**)
 - `supportedChallengeTypes` must not be empty (and if `activeLivenessEnabled`, must have ≥ 1 type)
 
 ---
@@ -129,11 +133,58 @@ Any field not overridden inherits the base value. The merge happens in `Liveness
 
 ## Repeated Failure Actions
 
-| Action | Behavior |
-|--------|----------|
-| `LOCK_OUT` | Hard-fail the session; operator/device locked out of further attempts. Default. |
-| `FALLBACK` | Hard-fail and flag for fallback capture flow (e.g., manual verification). |
-| `ESCALATE_TO_OPERATOR` | Hard-fail and flag for supervisor/operator escalation. |
+What the session does once the active-challenge retry budget (`maxRetryCount`)
+is exhausted. **All three are terminal and none grants another challenge** — extra
+attempts belong in `maxRetryCount`, not in the failure action. They differ only in
+the outcome signal and whether the client may open a fresh session. Wired into the
+HTTP decision path (`DecisionEngineService.processChallengeValidation`), so a
+per-workflow value is real behaviour, not just stored config.
+
+| Action | Session | `action` returned | `failureReason` | `mayRetrySession` |
+|--------|---------|-------------------|-----------------|-------------------|
+| `LOCK_OUT` | FAILED | `locked` | `max_retries_exceeded:locked_out` | `false` |
+| `ESCALATE_TO_OPERATOR` | FAILED | `escalate_to_operator` | `max_retries_exceeded:escalation_required` | `false` |
+| `FALLBACK` (seeded as `ALLOW_RETRY`) | FAILED | `failed` | `max_retries_exceeded` | `true` |
+
+`escalate_to_operator` is a signal only (there is no escalation endpoint of its
+own); the client routes the subject to an operator.
+
+---
+
+## Per-user-type policy at session start
+
+The user type (`RESIDENT` / `OPERATOR` / `SUPERVISOR`) is chosen **once**, when the
+session is created. The server resolves that workflow's effective policy, validates
+it, and **freezes it on the session** (`policy_snapshot`). The decision engine then
+uses the frozen snapshot for the whole session, so an admin edit to
+`config_policies` cannot change an in-flight session's operating point. Legacy rows
+with no snapshot fall back to a live read.
+
+The three workflows seed **distinct** operating points (single source of truth:
+`WorkflowPolicyDefaults`, mirrored by the `V4__session_policy_snapshot.sql` seed and
+the `ConfigController` lazy-create path):
+
+| Workflow | `passiveThreshold` | `minChallengeCount` | `challengeTimeoutMs` | `maxRetryCount` | `onRepeatedFailure` | challenges |
+|----------|--------------------|---------------------|----------------------|-----------------|---------------------|------------|
+| `RESIDENT` | 0.80 | 1 | 20000 | 3 | `ESCALATE_TO_OPERATOR` | blink, smile |
+| `OPERATOR` | 0.82 | 1 | 15000 | 2 | `ALLOW_RETRY` | blink, turn_left, turn_right |
+| `SUPERVISOR` | 0.85 | 2 | 15000 | 1 | `LOCK_OUT` | blink, smile, turn_left, turn_right |
+
+A resident may be physically assisted by an officer, so a failed resident check
+escalates to an operator; operator/supervisor authentication must never escalate to
+an operator, so those workflows fail/retry instead. All values are defaults —
+override any field at runtime with `PUT /api/v1/config/{workflowType}`.
+
+```bash
+# The session-create response carries the resolved, frozen policy:
+curl -s -X POST localhost:8000/api/v1/sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"workflowType":"SUPERVISOR","deviceId":"L1-CAM-01"}' | python3 -m json.tool
+```
+
+> Live preview vs frozen snapshot: `GET /api/v1/config/{workflowType}/effective`
+> shows what a **new** session would get; a session's own `policy` field shows what
+> that **in-flight** session is actually using.
 
 ---
 
@@ -148,7 +199,9 @@ Any field not overridden inherits the base value. The merge happens in `Liveness
 | PAD failure | "Face verification could not be completed. Please try again." | **No** (terminal, distinct audit) |
 | Challenge failure | "Verification action was not completed. Please try again." | Yes (retry) |
 | Challenge timeout | "Verification timed out. Please try again." | Yes (retry) |
-| Max retries exceeded | "Verification could not be completed. Please contact support." | No |
+| Max retries exceeded (`LOCK_OUT`) | "Face verification failed. Please contact an operator for assistance." | No |
+| Max retries exceeded (`ESCALATE_TO_OPERATOR`) | "Face verification could not be completed. An operator will assist you." | No (operator assist) |
+| Max retries exceeded (`FALLBACK`/`ALLOW_RETRY`) | "We could not verify face liveness. Please try again." | Yes — a **new** session (`mayRetrySession: true`) |
 | Device unavailable | "Biometric device is unavailable." | No |
 
 ---

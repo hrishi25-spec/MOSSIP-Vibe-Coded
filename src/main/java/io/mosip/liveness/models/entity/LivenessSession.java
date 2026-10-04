@@ -1,9 +1,12 @@
 package io.mosip.liveness.models.entity;
 
+import io.mosip.liveness.config.EffectivePolicy;
+import io.mosip.liveness.models.converter.EffectivePolicyJsonConverter;
 import io.mosip.liveness.models.enums.LivenessStage;
 import io.mosip.liveness.models.enums.SessionStatus;
 import io.mosip.liveness.models.enums.WorkflowType;
 import jakarta.persistence.Column;
+import jakarta.persistence.Convert;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
@@ -76,6 +79,20 @@ public class LivenessSession {
 
     @Column(name = "failure_reason", length = 256)
     private String failureReason;
+
+    /**
+     * Effective policy resolved once at session creation and frozen for the life
+     * of the session, so an admin edit to {@code config_policies} cannot change
+     * the operating point of an in-flight session. {@code null} on legacy rows
+     * (pre-V4), which the decision path resolves live instead.
+     */
+    @Convert(converter = EffectivePolicyJsonConverter.class)
+    @Column(name = "policy_snapshot", columnDefinition = "text")
+    private EffectivePolicy policySnapshot;
+
+    /** When the snapshot above was resolved. */
+    @Column(name = "policy_snapshot_at")
+    private OffsetDateTime policySnapshotAt;
 
     @Column(name = "created_at")
     private OffsetDateTime createdAt;

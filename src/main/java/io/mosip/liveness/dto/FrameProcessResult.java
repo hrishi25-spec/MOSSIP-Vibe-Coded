@@ -28,8 +28,16 @@ public class FrameProcessResult {
     private Double livenessScore;
     private Boolean padFlag;
     private String padAttackType;
-    private String action;  // proceed | escalate_to_active | reject | retry_passive
+    // proceed | escalate_to_active | retry_passive | reject | locked |
+    // escalate_to_operator | failed
+    private String action;
     private ChallengeInfo challenge;
+    /**
+     * True only when a session ended but the client may open a fresh one
+     * (the ALLOW_RETRY repeated-failure action). False/null for lock-out or
+     * escalation. Never grants a further challenge in this session.
+     */
+    private Boolean mayRetrySession;
     private String message;
 
     @Data

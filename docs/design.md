@@ -38,7 +38,7 @@
 | **Host Application** | Camera frame capture via device adapter, UI prompts, workflow orchestration |
 | **FaceLivenessEngine** | Session lifecycle, passive→active decision flow, challenge management, audit logging |
 | **LivenessBackend** | Frame analysis, face detection/landmarks, passive liveness scoring, PAD verdict |
-| **Config Resolver** | Base config + per-workflow policy overrides → effective session policy |
+| **Config Resolver** | Base config + per-user-type policy overrides → effective session policy, resolved once at session start and **frozen** on the session (`policy_snapshot`) so an in-flight session cannot drift when config is edited. See [configuration.md](configuration.md#per-user-type-policy-at-session-start). |
 | **Audit/Metrics** | Structured decision logs (no PII), anonymized operational metrics |
 
 ---
