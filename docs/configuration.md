@@ -13,7 +13,8 @@ Built via `LivenessConfig.builder()`:
 | `passiveMinFrames` | int | `5` | Minimum consecutive frames before a passive liveness decision is made. |
 | `passiveWindowFrames` | int | `7` | Sliding window size for temporal median voting. Must be ≥ `passiveMinFrames`. |
 | `minChallengeCount` | int | `2` | Minimum number of distinct challenges that must pass before active liveness is satisfied. |
-| `challengeTimeoutMs` | long | `15,000` | How long (ms) a challenge stays open for the user to perform the action. Lowered from 60,000 to 15,000 at the product's request; a 15s floor is applied at runtime. Exceeding the window consumes one retry. |
+| `challengeTimeoutMs` | long | `15,000` | How long (ms) a challenge stays open for the user to perform the action. Lowered from 60,000 to 15,000 at the product's request; the floor below is applied at runtime. Exceeding the window consumes one retry. |
+| `min-challenge-window-ms` (`mosip.liveness`) | long | `15,000` (hard min `1,000`) | Floor a stored `challengeTimeoutMs` is raised to, so a shortened or legacy policy row cannot turn a person who needed a moment into a certain failure. Raising it only makes the flow more patient; production lowers it only in tests (the e2e timeout path runs 3s windows instead of 2 × 15s). |
 | `maxRetries` | int | `2` | Number of retries (on top of the initial attempt) before hard failure. Total attempts = 1 + maxRetries. |
 | `supportedChallengeTypes` | Set\<ChallengeType\> | All 5 types | Pool of challenge types the engine may select from. |
 | `onRepeatedFailure` | RepeatedFailureAction | `LOCK_OUT` | Behavior when retry budget is exhausted: LOCK_OUT, FALLBACK, or ESCALATE_TO_OPERATOR. |
@@ -31,7 +32,68 @@ snapshot must be valid before it is persisted) and on every
 - `passiveWindowFrames` ≥ `passiveMinFrames`
 - `minChallengeCount` ≥ 1 (and **≤ the number of configured challenge types** when active liveness is on)
 - `maxRetries` ≥ 0
-- `challengeTimeoutMs` ≥ `LivenessConfig.MIN_CHALLENGE_WINDOW_MS` (**15,000**)
+- `challengeTimeoutMs` ≥ `mosip.liveness.min-challenge-window-ms`
+  (**15,000** by default, never below the engine's 1,000 clamp) — a shorter
+  window is refused by the API and again when a session freezes its snapshot
+- `mosip.liveness.min-challenge-window-ms` ≥ `1,000` (values below are clamped up)
+
+---
+
+## Auditing policy edits
+
+Every `PUT /api/v1/config/{workflowType}` writes one `CONFIG_CHANGED` entry to
+`audit_logs` **in the same transaction as the update**, so a saved policy can
+never be silent and a rolled-back update can never leave a phantom entry. A
+rejected request (no/invalid admin key, invalid value) writes nothing at all.
+
+```
+GET /api/v1/config/audit?limit=50     # newest first, 1–500
+GET /api/v1/config/audit?limit=50&workflowType=OPERATOR   # filtered in SQL, not in the client
+GET /api/v1/config/audit/verify          # walks the whole tamper-evident chain
+```
+
+`workflowType` is optional; omitting it returns every workflow. The filter is  pushed into the query (`audit_logs.workflow_type`, indexed by V8) because the
+audit table grows a row per frame decision — filtering after the fact would page
+through the whole pipeline history to answer a policy question. An unknown value
+is a 400, not a silently unfiltered feed.
+
+Every `CONFIG_CHANGED` row is chained (`prev_hash` → `entry_hash`), and
+PostgreSQL rejects `UPDATE` and `DELETE` on `audit_logs`. `/audit/verify`
+reports the first break and whether it was an edited row or a deleted one.
+
+```json
+{
+  "eventType": "CONFIG_CHANGED",
+  "createdAt": "2026-10-04T12:34:56.789Z",
+  "details": {
+    "workflowType": "OPERATOR",
+    "action": "UPDATED",
+    "actor": "key:9f2c1a7b4e0d",
+    "changes": {
+      "passiveThreshold": { "from": 0.80, "to": 0.93 },
+      "maxRetryCount": { "from": 3, "to": 4 }
+    }
+  }
+}
+```
+
+- **Only fields that actually moved** are listed. A `PUT` that resubmits the
+  current values is still recorded (someone touched the config) but with an empty
+  `changes` object — a real move and a no-op must not read alike.
+- **`action`** is `CREATED` when the `PUT` was the one that first created the
+  `config_policies` row, otherwise `UPDATED`.
+- **`actor`** is a truncated SHA-256 fingerprint of the presented admin key.
+  The key itself is never stored, logged or echoed; the fingerprint only
+  correlates edits made with the same key.
+- Config events have **no session**, so they never appear in a session's
+  `audit` trail, and that trail can never pick one up (`session_id IS NULL`).
+- The feed is an open read, like `GET /api/v1/config/{workflowType}` (which
+  already publishes the current policy). Only writes require the admin key.
+
+ponytail: the feed is a bounded, newest-first read of one table with no
+per-workflow server-side filter — the workflow type lives inside the JSON
+`details` column, which is deliberately unqueryable (text, identical on H2 and  PostgreSQL). Filter client-side, as `static/console.js` does.
+
 - `supportedChallengeTypes` must not be empty (and if `activeLivenessEnabled`, must have ≥ 1 type)
 
 ---
@@ -85,8 +147,10 @@ that, no recommendation.
 curl 'http://localhost:8000/api/v1/eval/threshold-sweep?targetBpcer=0.02'
 
 # apply the recommended value per workflow (DB row wins at runtime)
+# PUT requires the admin API key (fail-closed: set MOSIP_ADMIN_API_KEY first)
 curl -X PUT http://localhost:8000/api/v1/config/RESIDENT \
      -H 'Content-Type: application/json' \
+     -H "X-Admin-API-Key: $MOSIP_ADMIN_API_KEY" \
      -d '{"passiveThreshold": 0.90}'
 ```
 

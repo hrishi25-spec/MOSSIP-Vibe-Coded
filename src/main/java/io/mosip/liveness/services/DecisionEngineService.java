@@ -17,6 +17,7 @@ import io.mosip.liveness.models.enums.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.opencv.core.Mat;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -51,8 +52,20 @@ public class DecisionEngineService {
      *
      * <p>Lowered from 60s to 15s at the product's request, matching
      * {@link io.mosip.liveness.config.LivenessConfig#DEFAULT_CHALLENGE_TIMEOUT_MS}.</p>
+     *
+     * <p>This is the default of {@link #minChallengeWindowMs}; production never
+     * lowers it, so the effective window is 15s unless an operator raises it.</p>
      */
     public static final long MIN_CHALLENGE_WINDOW_MS = 15_000L;
+
+    /**
+     * Hard lower bound for the configured floor. The config API already refuses a
+     * {@code challengeTimeoutMs} under 1000ms, so letting the floor go below that
+     * would be worse than useless: a sub-second challenge window turns a person
+     * who needed a moment into a certain failure. Configured values below this
+     * are treated as this value.
+     */
+    static final long ABSOLUTE_MIN_CHALLENGE_WINDOW_MS = 1_000L;
 
     /**
      * Number of consecutive frames that must agree on a PAD attack before the
@@ -64,6 +77,19 @@ public class DecisionEngineService {
      * positives that terminally failed honest sessions.
      */
     public static final int PAD_CONFIRM_FRAMES = 2;
+
+    /**
+     * The floor a stored {@code challengeTimeoutMs} is raised to, i.e. how long a
+     * challenge really stays open. Defaults to {@link #MIN_CHALLENGE_WINDOW_MS}.
+     *
+     * <p>ponytail: an operator/test knob, not a per-workflow policy field — it is
+     * the anti-footgun guard for the whole decision engine and must never be
+     * lowered below {@link #ABSOLUTE_MIN_CHALLENGE_WINDOW_MS}. Lowering it is only
+     * sane in tests, where it turns the real-time timeout path (two window
+     * waits) into seconds instead of half a minute.</p>
+     */
+    @Value("${mosip.liveness.min-challenge-window-ms:" + MIN_CHALLENGE_WINDOW_MS + "}")
+    private long minChallengeWindowMs = MIN_CHALLENGE_WINDOW_MS;
 
     private final LivenessEngineService livenessEngine;
     private final PadEngineService padEngine;
@@ -381,9 +407,10 @@ public class DecisionEngineService {
         // window has genuinely elapsed, and return a non-terminal "continue" so the
         // client can keep the same challenge id and try again. No retry budget is
         // consumed and the challenge is not marked FAILED yet.
+        long floor = minWindowMs();
         long windowMs = challenge.getTimeoutMs() != null
-                ? Math.max(challenge.getTimeoutMs(), MIN_CHALLENGE_WINDOW_MS)
-                : MIN_CHALLENGE_WINDOW_MS;
+                ? Math.max(challenge.getTimeoutMs(), floor)
+                : floor;
         long elapsedMs = elapsedSince(challenge.getIssuedAt());
         if (elapsedMs < windowMs) {
             long remainingSec = Math.max(1L, (windowMs - elapsedMs + 999L) / 1000L);
@@ -417,6 +444,13 @@ public class DecisionEngineService {
                 "action", "retry_challenge",
                 "message", "We could not verify that action. Let's try a different one.",
                 "challenge", issueChallenge(session, policy));
+    }
+
+    /**
+     * The configured floor, clamped to the absolute minimum.
+     */
+    private long minWindowMs() {
+        return Math.max(minChallengeWindowMs, ABSOLUTE_MIN_CHALLENGE_WINDOW_MS);
     }
 
     /**
@@ -509,6 +543,10 @@ public class DecisionEngineService {
         AuditLog audit = AuditLog.builder()
                 .session(session)
                 .eventType(eventType)
+                // Same column the config feed filters on, populated here too so
+                // the table is never half-NULL: any future "everything for
+                // OPERATOR" query covers pipeline events, not just policy edits.
+                .workflowType(session.getWorkflowType())
                 .details(details != null ? new HashMap<>(details) : new HashMap<>())
                 .build();
         auditLogRepo.save(audit);

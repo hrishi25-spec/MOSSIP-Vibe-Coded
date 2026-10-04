@@ -26,6 +26,19 @@ class Settings(BaseSettings):
     DEFAULT_MAX_RETRY_COUNT: int = 3
     DEFAULT_CHALLENGE_TYPES: list[str] = ["blink", "smile", "turn_left", "turn_right"]
 
+    # ---- Security ----
+    # Origins allowed to call the API cross-origin (Registration Clients and
+    # local dev servers). Override via CORS_ORIGINS (JSON list) in production;
+    # the old wildcard + credentials combination is gone.
+    CORS_ORIGINS: list[str] = [
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+    # Reject POST/PUT bodies larger than this before they are parsed.
+    MAX_REQUEST_BODY_BYTES: int = 24 * 1024 * 1024
+
     @property
     def SQLALCHEMY_DATABASE_URI(self) -> str:
         return (

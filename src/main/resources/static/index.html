@@ -6,68 +6,7 @@
 <!-- Inline empty icon: stops the browser from requesting /favicon.ico on every load. -->
 <link rel="icon" href="data:,">
 <title>MOSIP Face Liveness &amp; PAD — Test Console</title>
-<style>
-  :root{
-    --bg:#0f1216; --panel:#171b21; --panel2:#1d2229; --line:#2a3038;
-    --fg:#e6eaf0; --muted:#8b96a5; --accent:#4f8cff; --ok:#3ecf8e;
-    --warn:#e0b13a; --bad:#f2555a; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  }
-  *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--fg);
-    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-  header{padding:16px 20px;border-bottom:1px solid var(--line);display:flex;
-    align-items:center;gap:14px;flex-wrap:wrap;background:var(--panel)}
-  header h1{margin:0;font-size:15px;font-weight:600;letter-spacing:.2px}
-  .pill{padding:3px 9px;border-radius:999px;font-size:11px;font-weight:600;
-    border:1px solid var(--line);background:var(--panel2);color:var(--muted)}
-  .pill.ok{color:var(--ok);border-color:#1d5b42}
-  .pill.bad{color:var(--bad);border-color:#5b1d20}
-  .pill.warn{color:var(--warn);border-color:#5b4a1d}
-  main{display:grid;grid-template-columns:minmax(340px,1fr) minmax(380px,1.15fr);
-    gap:16px;padding:16px;align-items:start}
-  @media(max-width:940px){main{grid-template-columns:1fr}}
-  section{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
-  section h2{margin:0;padding:11px 14px;font-size:12px;font-weight:600;letter-spacing:.6px;
-    text-transform:uppercase;color:var(--muted);background:var(--panel2);border-bottom:1px solid var(--line)}
-  .body{padding:14px}
-  /* Mirrored like a selfie, so the preview matches how you see yourself and
-     therefore matches the instruction ("turn left" moves you left on screen).
-     Display-only: CSS never changes captured pixel data, so the frames POSTed to
-     the API remain raw and un-mirrored - which is what the engine expects. */
-  video{width:100%;border-radius:8px;background:#000;display:block;aspect-ratio:4/3;
-    object-fit:cover;transform:scaleX(-1)}
-  button{font:inherit;font-weight:600;padding:9px 14px;border-radius:8px;border:1px solid var(--line);
-    background:var(--panel2);color:var(--fg);cursor:pointer}
-  button:hover:not(:disabled){border-color:#3d4753}
-  button:disabled{opacity:.45;cursor:not-allowed}
-  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-  button.danger{background:#3a1c1e;border-color:#6d2a2e;color:#ffc9cb}
-  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-  .row+.row{margin-top:9px}
-  label.field{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--muted);flex:1;min-width:110px}
-  input,select{font:inherit;padding:7px 9px;border-radius:7px;border:1px solid var(--line);
-    background:#12161b;color:var(--fg);width:100%}
-  .verdict{padding:12px;border-radius:8px;border:1px solid var(--line);background:var(--panel2)}
-  .verdict .action{font:600 16px/1.3 var(--mono)}
-  .verdict .msg{color:var(--muted);margin-top:4px}
-  .verdict.proceed{border-color:#1d5b42;background:#12241c}
-  .verdict.reject{border-color:#5b1d20;background:#241214}
-  .verdict.escalate{border-color:#5b4a1d;background:#241f12}
-  pre{margin:0;font:12px/1.5 var(--mono);white-space:pre-wrap;word-break:break-word;
-    max-height:260px;overflow:auto;color:#b9c4d2}
-  .kv{display:grid;grid-template-columns:auto 1fr;gap:5px 12px;font-size:12.5px}
-  .kv dt{color:var(--muted)}
-  .kv dd{margin:0;font-family:var(--mono)}
-  .hint{font-size:12px;color:var(--muted);margin-top:10px}
-  .warnbox{padding:11px 13px;border-radius:8px;border:1px solid #5b4a1d;background:#241f12;
-    color:#f0dca6;font-size:12.5px;margin-bottom:14px}
-  .steps{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
-  .step{font-size:11px;padding:4px 9px;border-radius:999px;border:1px solid var(--line);
-    color:var(--muted);background:var(--panel2)}
-  .step.active{color:#fff;background:var(--accent);border-color:var(--accent)}
-  .step.done{color:var(--ok);border-color:#1d5b42}
-  .spacer{flex:1}
-</style>
+<link rel="stylesheet" href="console.css">
 </head>
 <body>
 
@@ -95,7 +34,7 @@
 
         <video id="video" autoplay playsinline muted></video>
 
-        <div class="row" style="margin-top:12px">
+        <div class="row mt12">
           <label class="field">Workflow
             <select id="workflow">
               <option value="RESIDENT">RESIDENT</option>
@@ -108,13 +47,13 @@
           </label>
         </div>
 
-        <div class="row" style="margin-top:12px">
+        <div class="row mt12">
           <button id="btn-camera">Start camera</button>
           <button id="btn-run" class="primary" disabled>Run liveness check</button>
           <button id="btn-stop" class="danger" disabled>Stop</button>
         </div>
 
-        <div id="verdict" class="verdict" style="margin-top:14px" hidden>
+        <div id="verdict" class="verdict mt14" hidden>
           <div class="action" id="verdict-action"></div>
           <div class="msg" id="verdict-msg"></div>
         </div>
@@ -131,10 +70,103 @@
       </div>
     </section>
 
-    <section style="margin-top:16px">
+    <section class="mt16">
       <h2>Operational metrics</h2>
       <div class="body"><dl class="kv" id="metrics"><dt>—</dt><dd>—</dd></dl>
-        <div class="row" style="margin-top:12px"><button id="btn-metrics">Refresh metrics</button></div>
+        <div class="row mt12"><button id="btn-metrics">Refresh metrics</button></div>
+      </div>
+    </section>
+
+    <section class="mt16">
+      <h2>Request budget</h2>
+      <div class="body">
+        <div id="rl-buckets" class="rl-buckets">No limited requests yet.</div>
+        <p class="hint">The service publishes <code>X-RateLimit-Limit</code>,
+          <code>-Remaining</code> and <code>-Reset</code> on session creation and on frame /
+          challenge submissions. Capture faster than the window and the frame budget empties —
+          the console shows the limiter running down before the 429 arrives.</p>
+      </div>
+    </section>
+
+    <section class="mt16">
+      <h2>Config policy</h2>
+      <div class="body">
+        <div class="row">
+          <label class="field">Workflow
+            <select id="cfg-workflow">
+              <option value="RESIDENT">RESIDENT</option>
+              <option value="OPERATOR">OPERATOR</option>
+              <option value="SUPERVISOR">SUPERVISOR</option>
+            </select>
+          </label>
+          <label class="field">Admin API key (MOSIP_ADMIN_API_KEY)
+            <input id="cfg-key" type="password" autocomplete="off" placeholder="required to save">
+            <span id="cfg-key-hint" class="key-hint" hidden></span>
+          </label>
+        </div>
+        <div class="row mt12">
+          <label class="field">Passive threshold (0–1)
+            <input id="cfg-threshold" type="number" min="0" max="1" step="0.01">
+          </label>
+          <label class="field">Challenge timeout (ms)
+            <input id="cfg-timeout" type="number" min="1000" step="500">
+          </label>
+        </div>
+        <div class="row mt12">
+          <label class="field">Min challenges
+            <input id="cfg-min-challenges" type="number" min="1" step="1">
+          </label>
+          <label class="field">Max retries
+            <input id="cfg-retries" type="number" min="0" step="1">
+          </label>
+          <label class="field">On repeated failure
+            <select id="cfg-failure">
+              <option value="LOCK">LOCK</option>
+              <option value="ESCALATE">ESCALATE</option>
+              <option value="ALLOW_RETRY">ALLOW_RETRY</option>
+            </select>
+          </label>
+        </div>
+        <div class="row mt12">
+          <label class="chk"><input type="checkbox" id="cfg-liveness"> liveness enabled</label>
+          <label class="chk"><input type="checkbox" id="cfg-active"> active liveness</label>
+        </div>
+        <div class="row mt12">
+          <label class="chk"><input type="checkbox" id="cfg-ch-blink"> blink</label>
+          <label class="chk"><input type="checkbox" id="cfg-ch-smile"> smile</label>
+          <label class="chk"><input type="checkbox" id="cfg-ch-left"> turn_left</label>
+          <label class="chk"><input type="checkbox" id="cfg-ch-right"> turn_right</label>
+        </div>
+        <div class="row mt12">
+          <button id="btn-cfg-load">Load policy</button>
+          <button id="btn-cfg-save" class="primary">Save policy</button>
+          <button id="btn-cfg-forget-key">Forget key</button>
+        </div>
+        <div id="cfg-status" class="cfg-status"></div>
+        <p class="hint">Saving issues a <code>PUT</code> with the admin key; loading is an
+          open <code>GET</code>. The key stays in this tab's sessionStorage — it is never
+          written to the decision log, and the field shows only a masked tail so a screen
+          share or screenshot can't leak it.</p>
+      </div>
+    </section>
+
+    <section class="mt16">
+      <h2>Policy change history</h2>
+      <div class="body">
+        <div class="row">
+          <button id="btn-cfg-audit">Refresh change history</button>
+          <label class="row-label" for="cfg-audit-workflow">Workflow</label>
+          <select id="cfg-audit-workflow">
+            <option value="">All workflows</option>
+            <option value="RESIDENT">RESIDENT</option>
+            <option value="OPERATOR">OPERATOR</option>
+            <option value="SUPERVISOR">SUPERVISOR</option>
+          </select>
+        </div>
+        <pre id="cfg-audit">No policy changes recorded yet.</pre>
+        <p class="hint">Every <code>PUT</code> to <code>/api/v1/config/{workflow}</code> is
+          recorded with the fields that moved, their previous and new values, and a
+          fingerprint of the admin key that made the change.</p>
       </div>
     </section>
   </div>
@@ -145,16 +177,16 @@
       <div class="body"><pre id="log">Ready.</pre></div>
     </section>
 
-    <section style="margin-top:16px">
+    <section class="mt16">
       <h2>Last frame verdict</h2>
       <div class="body"><dl class="kv" id="last"><dt>—</dt><dd>—</dd></dl></div>
     </section>
 
-    <section style="margin-top:16px">
+    <section class="mt16">
       <h2>Audit trail</h2>
       <div class="body">
         <pre id="audit">No session yet.</pre>
-        <div class="row" style="margin-top:12px">
+        <div class="row mt12">
           <button id="btn-audit">Refresh audit</button>
           <button id="btn-close">Close session</button>
         </div>
@@ -163,314 +195,6 @@
   </div>
 </main>
 
-<script>
-(() => {
-  "use strict";
-
-  const API = "/api/v1";
-  const $ = id => document.getElementById(id);
-  const video = $("video");
-
-  let stream = null, running = false, sessionId = null, lastChallenge = null;
-
-  // ---------- helpers ----------
-  const logEl = $("log");
-  function log(msg) {
-    const t = new Date().toLocaleTimeString();
-    logEl.textContent += `\n[${t}] ${msg}`;
-    logEl.scrollTop = logEl.scrollHeight;
-  }
-  function setStep(n, cls) {
-    const el = $("s" + n);
-    el.classList.remove("active", "done");
-    if (cls) el.classList.add(cls);
-  }
-  function resetSteps() { [1,2,3,4].forEach(n => setStep(n, null)); }
-  function kv(dl, obj) {
-    dl.innerHTML = "";
-    for (const [k, v] of Object.entries(obj)) {
-      const dt = document.createElement("dt"); dt.textContent = k;
-      const dd = document.createElement("dd"); dd.textContent = v === null || v === undefined ? "—" : String(v);
-      dl.append(dt, dd);
-    }
-  }
-  function verdict(kind, action, message) {
-    const box = $("verdict");
-    box.hidden = false;
-    box.className = "verdict " + (kind || "");
-    $("verdict-action").textContent = action || "";
-    $("verdict-msg").textContent = message || "";
-  }
-
-  async function api(path, options) {
-    const res = await fetch(API + path, Object.assign({
-      headers: { "Content-Type": "application/json" }
-    }, options || {}));
-    const text = await res.text();
-    let body = null;
-    try { body = text ? JSON.parse(text) : null; } catch { body = text; }
-    if (!res.ok) {
-      const detail = body && body.error ? `${body.error}: ${body.message}` : `HTTP ${res.status}`;
-      throw new Error(detail);
-    }
-    return body;
-  }
-
-  function grabFrame(quality = 0.85) {
-    const canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth || 640;
-    canvas.height = video.videoHeight || 480;
-    canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL("image/jpeg", quality);
-  }
-
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-  // ---------- health ----------
-  async function refreshHealth() {
-    try {
-      const res = await fetch("/health");
-      const h = await res.json();
-      $("pill-health").textContent = "service: " + h.status;
-      $("pill-health").className = "pill ok";
-      const available = h.engine === "available";
-      $("pill-engine").textContent = "engine: " + h.engine;
-      $("pill-engine").className = "pill " + (available ? "ok" : "warn");
-      const warn = $("engine-warn");
-      if (available) {
-        warn.hidden = true;
-      } else {
-        warn.hidden = false;
-        warn.textContent = "The OpenCV native library is unavailable on this platform, so "
-          + "frame processing is disabled and every frame request will return 503.";
-      }
-    } catch {
-      $("pill-health").textContent = "service: unreachable";
-      $("pill-health").className = "pill bad";
-    }
-  }
-
-  // ---------- camera ----------
-  $("btn-camera").addEventListener("click", async () => {
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" }, audio: false
-      });
-      video.srcObject = stream;
-      $("btn-camera").disabled = true;
-      $("btn-run").disabled = false;
-      log("Camera started.");
-    } catch (e) {
-      log("Camera error: " + e.message
-        + "\n  Browsers expose the camera only on a secure origin — use http://localhost:8000");
-    }
-  });
-
-  // ---------- the liveness run ----------
-  $("btn-run").addEventListener("click", async () => {
-    if (running) return;
-    running = true;
-    $("btn-run").disabled = true;
-    $("btn-stop").disabled = false;
-    resetSteps();
-    $("audit").textContent = "No entries yet.";
-    $("last").innerHTML = "<dt>—</dt><dd>—</dd>";
-
-    try {
-      // 1 — session
-      setStep(1, "active");
-      const session = await api("/sessions", {
-        method: "POST",
-        body: JSON.stringify({
-          workflowType: $("workflow").value,
-          deviceId: $("deviceId").value || "WEB-CAM"
-        })
-      });
-      sessionId = session.id;
-      lastChallenge = null;
-      $("pill-session").textContent = "session " + sessionId.slice(0, 8);
-      $("pill-session").className = "pill ok";
-      log(`Session created: ${sessionId}\n  workflow=${session.workflowType} status=${session.status}`);
-      setStep(1, "done");
-
-      // 2 — passive
-      setStep(2, "active");
-      let escalated = null, outcome = null;
-      for (let i = 1; i <= 12 && running; i++) {
-        const frame = grabFrame();
-        const r = await api(`/sessions/${sessionId}/frames`, {
-          method: "POST",
-          body: JSON.stringify({ frameBase64: frame })
-        });
-        kv($("last"), {
-          sessionId: r.sessionId, stage: r.stage, faceDetected: r.faceDetected,
-          multipleFaces: r.multipleFaces, faceQuality: fmt(r.faceQuality),
-          livenessScore: fmt(r.livenessScore), padFlag: r.padFlag,
-          padAttackType: r.padAttackType, action: r.action, message: r.message
-        });
-        log(`frame ${i}: action=${r.action} face=${r.faceDetected}`
-          + ` quality=${fmt(r.faceQuality)} score=${fmt(r.livenessScore)}`
-          + (r.padAttackType ? ` pad=${r.padAttackType}` : ""));
-
-        if (r.action === "escalate_to_active") { escalated = r; break; }
-        if (r.action === "proceed" || r.action === "reject") { outcome = r; break; }
-        await sleep(350);
-      }
-
-      if (!outcome && escalated) {
-        setStep(2, "done");
-        setStep(3, "active");
-        outcome = await runChallenges(escalated);
-      } else {
-        setStep(2, "done");
-      }
-
-      if (running) {
-        setStep(3, "done");
-        setStep(4, "active");
-        if (outcome && outcome.action === "proceed") {
-          verdict("proceed", "PROCEED", outcome.message || "Liveness verified.");
-        } else if (outcome) {
-          verdict("reject", "REJECT", outcome.message || "Liveness could not be verified.");
-        } else {
-          verdict("", "INCOMPLETE", "No terminal verdict was reached.");
-        }
-        setStep(4, "done");
-      }
-      await refreshAudit();
-      await refreshMetrics();
-    } catch (e) {
-      log("ERROR: " + e.message);
-      verdict("reject", "ERROR", e.message);
-    } finally {
-      running = false;
-      $("btn-run").disabled = false;
-      $("btn-stop").disabled = true;
-    }
-  });
-
-  // Active challenge-response loop.
-  //
-  // A challenge stays open for a whole window (the server enforces a 15s floor).
-  // We keep grabbing frames and re-checking the *same* challenge id every few
-  // hundred milliseconds, so capture stops the instant the action is detected.
-  // While the window is open and nothing has been seen the server answers
-  // "continue"; only after the window elapses does a miss count as a failure.
-  async function runChallenges(escalation) {
-    let challenge = escalation.challenge;
-    let rounds = 0;
-    // Each poll re-runs face detection and PAD on every frame it carries, which is
-    // the expensive path, so keep the window small and the cadence moderate. Four
-    // recent frames (2s of motion) alongside the baseline is plenty: the engine
-    // measures the *largest* excursion relative to the baseline, so the peak of a
-    // turn only has to fall inside one window, not all of them.
-    const WINDOW = 4;        // frames in the rolling evaluation window
-    const CAPTURE_MS = 500;  // gap between captured frames
-    const MIN_WINDOW_MS = 15000;
-
-    while (challenge && rounds < 6 && running) {
-      rounds++;
-      lastChallenge = challenge;
-
-      const readable = challenge.challengeType.replace(/_/g, " ").toLowerCase();
-      // The two challenge shapes disagree on the id field:
-      //   escalation response (FrameProcessResult.ChallengeInfo) -> `challengeId`
-      //   retry response      (ChallengeResponse)                -> `id`
-      // Accept either, and fail loudly rather than posting a null id.
-      const challengeId = challenge.challengeId || challenge.id;
-      if (!challengeId) throw new Error("Server returned a challenge without an id");
-
-      const windowMs = Math.max(challenge.timeoutMs || 0, MIN_WINDOW_MS);
-      const deadline = Date.now() + windowMs;
-
-      // Baseline frame taken before the action is performed, so the engine can
-      // measure movement against a neutral pose; it travels with every poll.
-      const baseline = grabFrame(0.9);
-      const recent = [];
-      log(`challenge ${rounds}: ${challenge.challengeType} — open up to `
-        + `${Math.round(windowMs / 1000)}s, stops as soon as it is detected`);
-      verdict("escalate", "ACTION REQUIRED",
-        (escalation.message || `Please ${readable}.`)
-        + " Take your time — the capture stops the moment the action is detected.");
-
-      let outcome = null;
-      // A little slack past the nominal deadline: the server owns the clock, so
-      // always let it deliver the final verdict for this challenge.
-      while (running && !outcome && Date.now() < deadline + 15000) {
-        recent.push(grabFrame(0.9));
-        if (recent.length > WINDOW) recent.shift();
-
-        const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
-        verdict("escalate", "CAPTURING…", `Perform "${readable}" — ${left}s left.`);
-
-        if (recent.length >= 3) {
-          const r = await api(`/sessions/${sessionId}/challenges/validate`, {
-            method: "POST",
-            body: JSON.stringify({ challengeId, framesBase64: [baseline, ...recent] })
-          });
-          log(`challenge ${rounds}: passed=${r.passed} action=${r.action} ${r.message || ""}`);
-          // "continue" = still open and nothing detected yet. Anything else
-          // (proceed / reject / retry_challenge) is final for this challenge.
-          if (r.action !== "continue") outcome = r;
-        }
-        if (!outcome) await sleep(CAPTURE_MS);
-      }
-
-      if (!running) return { action: null, message: "Stopped by user." };
-      if (!outcome) return { action: null, message: "Challenge window elapsed without a verdict." };
-      if (outcome.action === "proceed" || outcome.action === "reject") {
-        return { action: outcome.action, message: outcome.message };
-      }
-      // retry_challenge — the response carries the next challenge
-      challenge = outcome.challenge;
-      escalation = outcome;
-      if (!challenge) return { action: outcome.action, message: outcome.message };
-    }
-    return { action: null, message: "Challenge budget exhausted." };
-  }
-
-  $("btn-stop").addEventListener("click", () => {
-    running = false;
-    log("Stop requested.");
-    $("btn-stop").disabled = true;
-  });
-
-  function fmt(v) { return v === null || v === undefined ? "—" : Number(v).toFixed(3); }
-
-  // ---------- metrics / audit / session ----------
-  async function refreshMetrics() {
-    try {
-      const m = await api("/metrics");
-      kv($("metrics"), m);
-    } catch (e) { log("metrics error: " + e.message); }
-  }
-  async function refreshAudit() {
-    if (!sessionId) return;
-    try {
-      const entries = await api(`/sessions/${sessionId}/audit`);
-      $("audit").textContent = entries.length
-        ? entries.map(e => `${e.createdAt}  ${e.eventType}  ${JSON.stringify(e.details)}`).join("\n")
-        : "(no audit entries — audit records are written for PAD rejections, challenge issue/pass/fail and session outcomes)";
-    } catch (e) { log("audit error: " + e.message); }
-  }
-  $("btn-metrics").addEventListener("click", refreshMetrics);
-  $("btn-audit").addEventListener("click", refreshAudit);
-  $("btn-close").addEventListener("click", async () => {
-    if (!sessionId) { log("No session to close."); return; }
-    try {
-      const s = await api(`/sessions/${sessionId}/close`, { method: "POST" });
-      log(`Session closed: status=${s.status} frames=${s.totalFramesEvaluated}`
-        + ` challenges=${s.totalChallengesIssued} duration=${s.durationMs}ms`);
-      $("pill-session").textContent = "session " + sessionId.slice(0, 8) + " (" + s.status + ")";
-      $("pill-session").className = "pill";
-      await refreshAudit();
-    } catch (e) { log("close error: " + e.message); }
-  });
-
-  refreshHealth();
-  refreshMetrics();
-  setInterval(refreshHealth, 15000);
-})();
-</script>
+<script src="console.js"></script>
 </body>
 </html>

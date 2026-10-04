@@ -18,6 +18,7 @@ import io.mosip.liveness.models.enums.SessionStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.opencv.core.Mat;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.OffsetDateTime;
 import java.util.EnumSet;
@@ -149,6 +150,56 @@ class DecisionEngineServiceTest {
 
         assertEquals("continue", result.get("action"));
         assertEquals(ChallengeStatus.ISSUED, challenge.getStatus());
+        assertEquals(0, session.getRetryCount());
+    }
+
+    @Test
+    void aConfiguredFloorIsHonouredSoTheTimeoutPathRunsInSeconds() {
+        // Test-only lowering of the floor (production keeps 15s). A stored 1000ms
+        // timeout issued 5s ago must still count as elapsed, but only because the
+        // floor is 2000ms.
+        ReflectionTestUtils.setField(service, "minChallengeWindowMs", 2_000L);
+        challenge.setTimeoutMs(1_000);
+        challenge.setIssuedAt(OffsetDateTime.now().minusSeconds(5));
+        when(configService.getEffectivePolicy(any())).thenReturn(policy(1, 2));
+        when(livenessEngine.validateActive(eq(DB_TURN_LEFT), anyList(), any())).thenReturn(false);
+
+        Map<String, Object> result = service.processChallengeValidation(session, challenge, frames, imageUtils);
+
+        assertEquals("retry_challenge", result.get("action"));
+        assertEquals(1, session.getRetryCount());
+    }
+
+    @Test
+    void aConfiguredFloorKeepsAChallengeOpenPastItsStoredTimeout() {
+        // Opposite direction: floor 5000ms overrides a stored 1000ms window that
+        // expired 3s ago, so the miss must not be charged yet.
+        ReflectionTestUtils.setField(service, "minChallengeWindowMs", 5_000L);
+        challenge.setTimeoutMs(1_000);
+        challenge.setIssuedAt(OffsetDateTime.now().minusSeconds(3));
+        when(configService.getEffectivePolicy(any())).thenReturn(policy(1, 2));
+        when(livenessEngine.validateActive(eq(DB_TURN_LEFT), anyList(), any())).thenReturn(false);
+
+        Map<String, Object> result = service.processChallengeValidation(session, challenge, frames, imageUtils);
+
+        assertEquals("continue", result.get("action"));
+        assertEquals(ChallengeStatus.ISSUED, challenge.getStatus());
+        assertEquals(0, session.getRetryCount());
+    }
+
+    @Test
+    void aFloorBelowTheAbsoluteMinimumIsClampedToOneSecond() {
+        // 10ms would expire any challenge; the clamp keeps it open for 500ms,
+        // matching the smallest challengeTimeoutMs the config API accepts.
+        ReflectionTestUtils.setField(service, "minChallengeWindowMs", 10L);
+        challenge.setTimeoutMs(1_000);
+        challenge.setIssuedAt(OffsetDateTime.now().minus(500, java.time.temporal.ChronoUnit.MILLIS));
+        when(configService.getEffectivePolicy(any())).thenReturn(policy(1, 2));
+        when(livenessEngine.validateActive(eq(DB_TURN_LEFT), anyList(), any())).thenReturn(false);
+
+        Map<String, Object> result = service.processChallengeValidation(session, challenge, frames, imageUtils);
+
+        assertEquals("continue", result.get("action"));
         assertEquals(0, session.getRetryCount());
     }
 

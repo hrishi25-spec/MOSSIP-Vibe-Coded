@@ -5,6 +5,7 @@ import io.mosip.liveness.core.FaceSignals;
 import io.mosip.liveness.core.Frame;
 import io.mosip.liveness.core.LivenessException;
 import io.mosip.liveness.core.PadVerdict;
+import io.mosip.liveness.metrics.PipelineTimers;
 import org.opencv.core.Mat;
 import org.opencv.imgproc.Imgproc;
 import org.slf4j.Logger;
@@ -119,19 +120,26 @@ public class PassiveScoringService {
      */
     public double score(Mat frame, LivenessEngineService.FaceObservation observation, ImageUtils imageUtils) {
         if (!modelAvailable) {
-            return heuristicScorer.scorePassive(frame, observation, imageUtils);
+            return PipelineTimers.timed(PipelineTimers.HEURISTIC_SCORE,
+                    () -> heuristicScorer.scorePassive(frame, observation, imageUtils));
         }
-        try {
-            Frame coreFrame = toCoreFrame(frame);
-            FaceSignals signals = toSignals(observation);
-            if (model.analyzeFrame(coreFrame).faceCount() != 1) {
+        // The model and the fallback are timed separately: they are different
+        // pipelines with very different costs, and merging them would make an
+        // `auto` deployment that has silently fallen back look like it is
+        // paying ONNX prices for heuristic work.
+        return PipelineTimers.timed(PipelineTimers.ONNX_SCORE, () -> {
+            try {
+                Frame coreFrame = toCoreFrame(frame);
+                FaceSignals signals = toSignals(observation);
+                if (model.analyzeFrame(coreFrame).faceCount() != 1) {
+                    return heuristicScorer.scorePassive(frame, observation, imageUtils);
+                }
+                return model.scorePassiveLiveness(coreFrame, signals);
+            } catch (RuntimeException e) {
+                log.debug("Model scoring failed, using heuristic for this frame: {}", e.toString());
                 return heuristicScorer.scorePassive(frame, observation, imageUtils);
             }
-            return model.scorePassiveLiveness(coreFrame, signals);
-        } catch (RuntimeException e) {
-            log.debug("Model scoring failed, using heuristic for this frame: {}", e.toString());
-            return heuristicScorer.scorePassive(frame, observation, imageUtils);
-        }
+        });
     }
 
     /**
@@ -147,17 +155,19 @@ public class PassiveScoringService {
         if (!modelAvailable) {
             return Optional.empty();
         }
-        try {
-            Frame coreFrame = toCoreFrame(frame);
-            FaceSignals signals = toSignals(observation);
-            if (model.analyzeFrame(coreFrame).faceCount() != 1) {
+        return PipelineTimers.timed(PipelineTimers.PAD_ONNX, () -> {
+            try {
+                Frame coreFrame = toCoreFrame(frame);
+                FaceSignals signals = toSignals(observation);
+                if (model.analyzeFrame(coreFrame).faceCount() != 1) {
+                    return Optional.empty();
+                }
+                return Optional.of(model.assessPad(coreFrame, signals));
+            } catch (RuntimeException e) {
+                log.debug("Model PAD failed, heuristic PAD only for this frame: {}", e.toString());
                 return Optional.empty();
             }
-            return Optional.of(model.assessPad(coreFrame, signals));
-        } catch (RuntimeException e) {
-            log.debug("Model PAD failed, heuristic PAD only for this frame: {}", e.toString());
-            return Optional.empty();
-        }
+        });
     }
 
     /** The HTTP path's face gate has already accepted exactly one face. */

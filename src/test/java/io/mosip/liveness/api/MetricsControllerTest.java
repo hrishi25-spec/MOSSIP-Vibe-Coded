@@ -23,6 +23,7 @@ class MetricsControllerTest {
     @Autowired private LivenessSessionRepository sessionRepo;
     @Autowired private FrameEventRepository frameEventRepo;
     @Autowired private ChallengeRepository challengeRepo;
+    @Autowired private RateLimitCounters rateLimitCounters;
 
     @Test
     void getMetrics_emptyDatabase_returnsZeros() throws Exception {
@@ -56,5 +57,45 @@ class MetricsControllerTest {
                 .andExpect(jsonPath("$.passRate").value(0.8))
                 .andExpect(jsonPath("$.livenessFailureRate").value(0.15))
                 .andExpect(jsonPath("$.avgFramesPerSession").value(5.0));
+    }
+
+    @Test
+    void getMetrics_reportsRateLimiterCountersPerRule() throws Exception {
+        when(sessionRepo.count()).thenReturn(0L);
+        when(sessionRepo.countByStatus(SessionStatus.PASSED)).thenReturn(0L);
+        when(sessionRepo.countByStatus(SessionStatus.FAILED)).thenReturn(0L);
+        when(sessionRepo.countByStatus(SessionStatus.ACTIVE)).thenReturn(0L);
+        when(frameEventRepo.countDistinctSessionsByStage(LivenessStage.ACTIVE)).thenReturn(0L);
+        when(frameEventRepo.count()).thenReturn(0L);
+        when(challengeRepo.count()).thenReturn(0L);
+        when(sessionRepo.sumRetryCount()).thenReturn(0L);
+        // 3 allowed, 2 refused on session creation; 1 allowed, 4 refused on frames.
+        when(rateLimitCounters.snapshot()).thenReturn(new RateLimitCounters.Counts(3, 2, 1, 4));
+
+        mockMvc.perform(get("/api/v1/metrics"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rateLimitAllowedRequests").value(4))
+                .andExpect(jsonPath("$.rateLimitedRequests").value(6))
+                .andExpect(jsonPath("$.rateLimitedSessionCreate").value(2))
+                .andExpect(jsonPath("$.rateLimitedFrames").value(4))
+                .andExpect(jsonPath("$.rateLimitRejectionRate").value(0.6));
+    }
+
+    @Test
+    void getMetrics_neverReportsNaNWhenTheLimiterHasSeenNothing() throws Exception {
+        when(sessionRepo.count()).thenReturn(0L);
+        when(sessionRepo.countByStatus(SessionStatus.PASSED)).thenReturn(0L);
+        when(sessionRepo.countByStatus(SessionStatus.FAILED)).thenReturn(0L);
+        when(sessionRepo.countByStatus(SessionStatus.ACTIVE)).thenReturn(0L);
+        when(frameEventRepo.countDistinctSessionsByStage(LivenessStage.ACTIVE)).thenReturn(0L);
+        when(frameEventRepo.count()).thenReturn(0L);
+        when(challengeRepo.count()).thenReturn(0L);
+        when(sessionRepo.sumRetryCount()).thenReturn(0L);
+        when(rateLimitCounters.snapshot()).thenReturn(new RateLimitCounters.Counts(0, 0, 0, 0));
+
+        mockMvc.perform(get("/api/v1/metrics"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rateLimitedRequests").value(0))
+                .andExpect(jsonPath("$.rateLimitRejectionRate").value(0.0));
     }
 }

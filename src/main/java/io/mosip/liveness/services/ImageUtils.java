@@ -1,5 +1,7 @@
 package io.mosip.liveness.services;
 
+import io.mosip.liveness.metrics.PipelineTimers;
+
 import org.opencv.core.*;
 import org.opencv.imgcodecs.Imgcodecs;
 import org.opencv.imgproc.Imgproc;
@@ -29,6 +31,17 @@ public class ImageUtils {
 
     static final String FACE_CASCADE = "haarcascade_frontalface_default.xml";
     static final String EYE_CASCADE = "haarcascade_eye.xml";
+
+    /** Hard cap on a decoded (binary) frame payload, before base64. */
+    static final int MAX_FRAME_BYTES = 6_000_000;
+    /** Hard cap per image dimension — guards against decompression bombs
+     *  (a tiny PNG that expands to a huge bitmap). */
+    static final int MAX_FRAME_DIMENSION = 8192;
+    /** Hard cap on total pixels (cols*rows) for the same reason. */
+    static final long MAX_FRAME_PIXELS = 40_000_000L;
+    /** Frames larger than this are downscaled before analysis so a 1080p/4K
+     *  camera costs the same CPU as a 640x480 one (low-end devices). */
+    static final int ANALYSIS_MAX_DIMENSION = 1280;
 
     // Lazy-load cascades so Mockito can proxy this class without triggering native lib loading
     private volatile CascadeClassifier faceCascade;
@@ -127,6 +140,13 @@ public class ImageUtils {
     }
 
     public Mat decodeBase64Frame(String frameBase64) {
+        // Timed as a whole, including the rejection guards: an oversized or
+        // undecodable frame is a cost this path still pays, and hiding it would
+        // make decode look free under attack.
+        return PipelineTimers.timed(PipelineTimers.DECODE, () -> decodeFrame(frameBase64));
+    }
+
+    private Mat decodeFrame(String frameBase64) {
         try {
             if (frameBase64.length() > 64 && frameBase64.contains(",")) {
                 frameBase64 = frameBase64.substring(frameBase64.indexOf(',') + 1);
@@ -135,12 +155,22 @@ public class ImageUtils {
             if (raw.length == 0) {
                 throw new InvalidFrameError("Empty frame payload");
             }
+            if (raw.length > MAX_FRAME_BYTES) {
+                throw new InvalidFrameError("Frame payload exceeds " + MAX_FRAME_BYTES + " bytes");
+            }
             MatOfByte matOfByte = new MatOfByte(raw);
             Mat image = Imgcodecs.imdecode(matOfByte, Imgcodecs.IMREAD_COLOR);
+            matOfByte.release();
             if (image.empty()) {
+                image.release();
                 throw new InvalidFrameError("Frame could not be decoded as an image");
             }
-            return image;
+            if (image.cols() > MAX_FRAME_DIMENSION || image.rows() > MAX_FRAME_DIMENSION
+                    || (long) image.cols() * image.rows() > MAX_FRAME_PIXELS) {
+                image.release();
+                throw new InvalidFrameError("Frame dimensions exceed supported limits");
+            }
+            return downscaleForAnalysis(image);
         } catch (InvalidFrameError e) {
             throw e;
         } catch (Exception e) {
@@ -148,7 +178,34 @@ public class ImageUtils {
         }
     }
 
+    /**
+     * Bound the CPU cost of face detection / quality scoring: Haar cascade and
+     * Laplacian work scale with pixel count, so a 4K frame would cost ~9x a
+     * 720p one. Frames above {@link #ANALYSIS_MAX_DIMENSION} are scaled down
+     * (INTER_AREA, quality-preserving) so every input resolution analyses at
+     * the same cost. Small frames (the console's 640x480) pass through
+     * untouched.
+     */
+    private Mat downscaleForAnalysis(Mat image) {
+        int maxSide = Math.max(image.cols(), image.rows());
+        if (maxSide <= ANALYSIS_MAX_DIMENSION) {
+            return image;
+        }
+        double scale = (double) ANALYSIS_MAX_DIMENSION / maxSide;
+        Size target = new Size(
+                Math.max(1, Math.round(image.cols() * scale)),
+                Math.max(1, Math.round(image.rows() * scale)));
+        Mat small = new Mat();
+        Imgproc.resize(image, small, target, 0, 0, Imgproc.INTER_AREA);
+        image.release();
+        return small;
+    }
+
     public Rect[] detectFaces(Mat image) {
+        return PipelineTimers.timed(PipelineTimers.FACE_DETECT, () -> detectFacesInternal(image));
+    }
+
+    private Rect[] detectFacesInternal(Mat image) {
         CascadeClassifier cascade = getFaceCascade();
         if (cascade == null || cascade.empty()) {
             return new Rect[0];

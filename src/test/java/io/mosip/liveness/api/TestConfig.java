@@ -5,6 +5,8 @@ import io.mosip.liveness.crud.ChallengeRepository;
 import io.mosip.liveness.crud.ConfigPolicyRepository;
 import io.mosip.liveness.crud.FrameEventRepository;
 import io.mosip.liveness.crud.LivenessSessionRepository;
+import io.mosip.liveness.config.EffectivePolicyValidator;
+import io.mosip.liveness.config.LivenessConfig;
 import io.mosip.liveness.services.ChallengeSelectorService;
 import io.mosip.liveness.services.DecisionEngineService;
 import io.mosip.liveness.services.ImageUtils;
@@ -83,5 +85,35 @@ public class TestConfig {
     @Bean @Primary
     public ThresholdCalibrationService thresholdCalibrationService() {
         return Mockito.mock(ThresholdCalibrationService.class);
+    }
+
+    /**
+ * MetricsController reads the limiter's tallies. Deliberately the counters, not
+ * the filter: a mocked Filter bean is auto-registered in a @WebMvcTest slice and
+ * swallows every request before it reaches a handler.
+ */
+    @Bean @Primary
+    public RateLimitCounters rateLimitCounters() {
+        return Mockito.mock(RateLimitCounters.class);
+    }
+
+    /**
+ * Real validator, not a mock: the session-create path refuses an invalid
+ * policy, and production's 15s window floor is what those slices must see.
+ */
+    @Bean @Primary
+    public EffectivePolicyValidator effectivePolicyValidator() {
+        return new EffectivePolicyValidator(LivenessConfig.MIN_CHALLENGE_WINDOW_MS);
+    }
+
+    /**
+ * Real resolver, not a fallback: {@code @Value} only binds on a managed bean,
+ * and a plain component is not part of a {@code @WebMvcTest} slice. Without
+ * this bean the IP filter would build its own resolver, trust nobody, and
+ * every forwarded-address assertion would silently read the socket peer.
+ */
+    @Bean @Primary
+    public ClientIpResolver clientIpResolver() {
+        return new ClientIpResolver();
     }
 }

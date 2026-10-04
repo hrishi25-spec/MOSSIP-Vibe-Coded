@@ -1,0 +1,797 @@
+package io.mosip.liveness;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.mosip.liveness.app.config.AppConfig;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.TestPropertySource;
+import org.springframework.web.client.HttpClientErrorException;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URI;
+import java.net.http.HttpRequest;
+import java.util.Base64;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.Supplier;
+
+import org.springframework.beans.factory.annotation.Value;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * Boots the real application — full bean graph, H2 (dev profile), real OpenCV
+ * face detection and the real ONNX MiniFASNet scorer — on a random port and
+ * drives the frame pipeline over HTTP. Nothing is mocked.
+ *
+ * <p>Each test uses a different workflow type where config is mutated, so those
+ * get independent config rows and the tests stay order-independent:</p>
+ * <ul>
+ *   <li>RESIDENT (default policy) — the real fixture face scores ~0.99 &gt;
+ *       0.80, so the median window must reach {@code proceed} → PASSED.</li>
+ *   <li>SUPERVISOR with {@code passiveThreshold=1.0} — the median can never
+ *       clear it, so the pipeline must escalate and open a challenge; static
+ *       frames cannot perform the action, so validation stays {@code continue}.</li>
+ *   <li>OPERATOR with {@code passiveThreshold=1.0} + active liveness off — the
+ *       escalation branch must terminate as {@code reject} → FAILED.</li>
+ *   <li>RESIDENT + {@code fixtures/print-attack.jpg} — two consecutive
+ *       PAD-positive frames must terminally reject before scoring
+ *       ({@code presentation_attack:PRINTED_PHOTO}). No config is mutated.</li>
+ *   <li>SUPERVISOR with a 3s challenge window (the deployment floor itself) and
+ *       {@code maxRetryCount=2} — a real-time test that waits out both windows:
+ *       {@code continue} → {@code retry_challenge} → {@code reject}
+ *       ({@code max_retries_exceeded}). Shares the SUPERVISOR config row with
+ *       the escalation test; each test re-PUTs the fields it depends on.</li>
+ *   <li>RESIDENT policy saved the way the browser console saves it (Chrome
+ *       headers, CORS preflight, {@code X-Admin-API-Key}) — accepted and audited,
+ *       refused without the key or from a foreign origin.</li>
+ * </ul>
+ */
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@ActiveProfiles("dev")
+@TestPropertySource(properties = {
+        "mosip.security.admin-api-key=" + LivenessPipelineIntegrationTest.ADMIN_KEY,
+        // Shortened only so the timeout path is exercised over real HTTP in
+        // seconds rather than 2 × 15s of wall clock. Production keeps the 15s
+        // default — DecisionEngineServiceTest pins the default and the 1s clamp.
+        "mosip.liveness.min-challenge-window-ms=" + LivenessPipelineIntegrationTest.WINDOW_MS,
+        // Test-only budget override. Every test in this class shares one process
+        // and therefore one per-IP session-create bucket (all requests arrive
+        // from 127.0.0.1), so the production 30/min is exhausted by the suite
+        // itself and tests fail with 429s depending on execution order. Raised
+        // high enough to be unreachable; the real defaults stay pinned by
+        // RateLimitFilterTest, and rateLimitBudget_isPublishedOnLimitedPosts
+        // asserts the *configured* limit rather than a literal so it keeps
+        // working under the override.
+        "mosip.security.rate-limit.session-create-limit=100000",
+        "mosip.security.rate-limit.frame-limit=100000",
+        "spring.jpa.show-sql=false"
+})
+/**
+ * ponytail: NOT parallelised, and the reason is not the rate limiter. Nearly
+ * every test here first PUTs the shared RESIDENT policy to stage its scenario
+ * (passiveThreshold, activeLivenessEnabled, challengeTimeoutMs, maxRetryCount),
+ * so concurrent methods overwrite each other's setup — running with
+ * {@code @Execution(CONCURRENT)} fails deterministically in
+ * {@code configChange_isTraceableInTheConfigAuditView} ("expected UPDATED but
+ * was CREATED", because another test had just re-created the policy).
+ *
+ * <p>Measured before deciding: 3/3 runs failed, and the class took ~75 s
+ * sequentially and ~75 s in parallel — no wall-clock win to trade the risk for.
+ * Genuine parallelism needs per-test policy isolation (a database each, or
+ * workflow types per test), which is a bigger change than this suite justifies.
+ * The rate-limit budgets are raised below so that coupling is at least gone.</p>
+ */
+class LivenessPipelineIntegrationTest {
+
+    static final String ADMIN_KEY = "e2e-admin-key";
+    /** Same header name as ConfigController.ADMIN_API_KEY_HEADER (package-private there). */
+    static final String ADMIN_HEADER = "X-Admin-API-Key";
+
+    /**
+     * Challenge window the timeout test configures — and the deployment's floor
+     * ({@code mosip.liveness.min-challenge-window-ms}, set to this value below),
+     * so the policy is accepted as written and runs exactly as configured. Sized
+     * so one window is 3s: the two windows plus two in-window probes cost ~8s
+     * instead of ~32s, and still leave ~1s of headroom before a probe could
+     * stray past the window.
+     */
+    static final long WINDOW_MS = 3_000L;
+    /** Policy path used by the browser-style test; it only touches the timeout. */
+    private static final String RESIDENT_CONFIG = "/api/v1/config/RESIDENT";
+    /** Well inside {@link #WINDOW_MS}: this frame must not end the window early. */
+    private static final long INSIDE_WINDOW_PROBE_MS = 1_300L;
+    /** Slack over {@link #WINDOW_MS} before asserting the window has elapsed. */
+    private static final long ELAPSED_MARGIN_MS = 700L;
+
+    private static final Set<String> CHALLENGE_TYPES =
+            Set.of("BLINK", "SMILE", "TURN_LEFT", "TURN_RIGHT");
+    /** passive-min-frames is 5, so a terminal verdict can never come later. */
+    private static final int MAX_FRAMES = 12;
+
+    private static String frameB64;
+    private static String attackB64;
+
+    @LocalServerPort private int port;
+    @Autowired private TestRestTemplate rest;
+    @Autowired private ObjectMapper mapper;
+
+    /**
+     * The budgets this run was configured with. Injected rather than written as
+     * literals because {@code @TestPropertySource} above raises them; asserting
+     * against the configured value keeps the test honest under the override.
+     */
+    @Value("${mosip.security.rate-limit.session-create-limit}")
+    private int sessionCreateLimit;
+    @Value("${mosip.security.rate-limit.frame-limit}")
+    private int frameLimit;
+
+    @BeforeEach
+    void requireOpenCv() {
+        // Same guard convention as ImageUtilsCascadeTest: without natives no
+        // frame can detect a face and the pipeline cannot be exercised.
+        Assumptions.assumeTrue(AppConfig.isOpenCvAvailable(),
+                "OpenCV native library unavailable on this platform");
+    }
+
+    @org.junit.jupiter.api.BeforeAll
+    static void loadFixtures() throws Exception {
+        frameB64 = fixtureB64("fixtures/real-face.jpg");
+        attackB64 = fixtureB64("fixtures/print-attack.jpg");
+    }
+
+    private static String fixtureB64(String resource) throws Exception {
+        try (InputStream in = LivenessPipelineIntegrationTest.class.getClassLoader()
+                .getResourceAsStream(resource)) {
+            assertNotNull(in, resource + " must be on the test classpath");
+            return Base64.getEncoder().encodeToString(in.readAllBytes());
+        }
+    }
+
+    // ------------------------------------------------------------------ 1. passive pass
+
+    @Test
+    void residentSession_passivePipeline_proceedsAndPasses() throws Exception {
+        ResponseEntity<String> created = exchange(HttpMethod.POST, "/api/v1/sessions",
+                sessionBody("RESIDENT"), false);
+        JsonNode session = expect(HttpStatus.CREATED, created);
+        UUID sessionId = UUID.fromString(session.get("id").asText());
+        // The security headers must survive all the way through real Tomcat.
+        assertEquals("nosniff", created.getHeaders().getFirst("X-Content-Type-Options"));
+        assertNotNull(created.getHeaders().getFirst("Content-Security-Policy"));
+
+        // Cold start: real decode → face detect → PAD → ONNX score, but fewer
+        // than passive-min-frames scores exist, so the answer is retry_passive.
+        JsonNode first = postFrame(sessionId, frameB64);
+        assertEquals("retry_passive", first.get("action").asText(), first.toString());
+        assertTrue(first.get("faceDetected").asBoolean(), "fixture face must be detected");
+        assertFalse(first.get("padFlag").asBoolean(), "fixture must not be flagged as an attack");
+        assertNotNull(first.get("livenessScore"), "real scorer must produce a score");
+
+        int sent = 1;
+        JsonNode last = first;
+        while (!terminal(last.get("action").asText()) && sent < MAX_FRAMES) {
+            last = postFrame(sessionId, frameB64);
+            sent++;
+        }
+        assertEquals("proceed", last.get("action").asText(), last.toString());
+        assertEquals("COMPLETED", last.get("stage").asText());
+
+        JsonNode after = expect(HttpStatus.OK,
+                exchange(HttpMethod.GET, "/api/v1/sessions/" + sessionId, null, false));
+        assertEquals("PASSED", after.get("status").asText());
+        assertTrue(after.get("finalResult").asBoolean());
+
+        JsonNode audit = expect(HttpStatus.OK,
+                exchange(HttpMethod.GET, "/api/v1/sessions/" + sessionId + "/audit", null, false));
+        assertTrue(hasEvent(audit, "SESSION_PASSED"), "audit must record the outcome: " + audit);
+
+        JsonNode summary = expect(HttpStatus.OK,
+                exchange(HttpMethod.POST, "/api/v1/sessions/" + sessionId + "/close", null, false));
+        assertEquals("PASSED", summary.get("status").asText());
+        assertEquals(sent, summary.get("totalFramesEvaluated").asInt());
+        assertEquals(0, summary.get("totalChallengesIssued").asInt());
+
+        JsonNode metrics = expect(HttpStatus.OK,
+                exchange(HttpMethod.GET, "/api/v1/metrics", null, false));
+        assertTrue(metrics.get("totalSessions").asInt() >= 1);
+    }
+
+    // ------------------------------------------------------------------ 2. escalation + challenge
+
+    @Test
+    void supervisorSession_belowThreshold_escalatesAndChallengeStaysOpen() throws Exception {
+        // Runtime policy change over the admin-key API — part of the pipeline.
+        expect(HttpStatus.OK, exchange(HttpMethod.PUT, "/api/v1/config/SUPERVISOR",
+                "{\"passiveThreshold\":1.0}", true));
+
+        UUID sessionId = UUID.fromString(expect(HttpStatus.CREATED,
+                exchange(HttpMethod.POST, "/api/v1/sessions",
+                        sessionBody("SUPERVISOR"), false)).get("id").asText());
+
+        JsonNode last = null;
+        int sent = 0;
+        while ((last == null || !terminal(last.get("action").asText())) && sent < MAX_FRAMES) {
+            last = postFrame(sessionId, frameB64);
+            sent++;
+        }
+        assertEquals("escalate_to_active", last.get("action").asText(), last.toString());
+
+        JsonNode challenge = last.get("challenge");
+        assertNotNull(challenge, "escalation must carry a challenge");
+        UUID challengeId = UUID.fromString(challenge.get("challengeId").asText());
+        assertTrue(CHALLENGE_TYPES.contains(challenge.get("challengeType").asText()),
+                "unexpected challenge type: " + challenge.get("challengeType").asText());
+
+        JsonNode after = expect(HttpStatus.OK,
+                exchange(HttpMethod.GET, "/api/v1/sessions/" + sessionId, null, false));
+        assertEquals("ACTIVE", after.get("status").asText());
+        assertEquals("ACTIVE", after.get("currentStage").asText());
+
+        // Static frames cannot perform the action, and the 15s window is still
+        // open, so validation must stay non-terminal rather than fail the try.
+        ObjectNode validate = mapper.createObjectNode();
+        validate.put("challengeId", challengeId.toString());
+        ArrayNode frames = validate.putArray("framesBase64");
+        frames.add(frameB64).add(frameB64).add(frameB64);
+        JsonNode result = expect(HttpStatus.OK, exchange(HttpMethod.POST,
+                "/api/v1/sessions/" + sessionId + "/challenges/validate",
+                validate.toString(), false));
+        assertEquals("continue", result.get("action").asText(), result.toString());
+        assertFalse(result.get("passed").asBoolean());
+
+        JsonNode audit = expect(HttpStatus.OK,
+                exchange(HttpMethod.GET, "/api/v1/sessions/" + sessionId + "/audit", null, false));
+        assertTrue(hasEvent(audit, "CHALLENGE_ISSUED"), "audit must record issuance: " + audit);
+
+        JsonNode summary = expect(HttpStatus.OK,
+                exchange(HttpMethod.POST, "/api/v1/sessions/" + sessionId + "/close", null, false));
+        assertEquals("EXPIRED", summary.get("status").asText());
+        assertEquals(1, summary.get("totalChallengesIssued").asInt());
+    }
+
+    // ------------------------------------------------------------------ 3. reject below threshold
+
+    @Test
+    void operatorSession_activeDisabled_rejectsBelowThreshold() throws Exception {
+        expect(HttpStatus.OK, exchange(HttpMethod.PUT, "/api/v1/config/OPERATOR",
+                "{\"passiveThreshold\":1.0,\"activeLivenessEnabled\":false}", true));
+
+        UUID sessionId = UUID.fromString(expect(HttpStatus.CREATED,
+                exchange(HttpMethod.POST, "/api/v1/sessions",
+                        sessionBody("OPERATOR"), false)).get("id").asText());
+
+        JsonNode last = null;
+        int sent = 0;
+        while ((last == null || !terminal(last.get("action").asText())) && sent < MAX_FRAMES) {
+            last = postFrame(sessionId, frameB64);
+            sent++;
+        }
+        assertEquals("reject", last.get("action").asText(), last.toString());
+
+        JsonNode after = expect(HttpStatus.OK,
+                exchange(HttpMethod.GET, "/api/v1/sessions/" + sessionId, null, false));
+        assertEquals("FAILED", after.get("status").asText());
+        assertEquals("passive_liveness_below_threshold", after.get("failureReason").asText());
+        assertFalse(after.get("finalResult").asBoolean());
+
+        JsonNode summary = expect(HttpStatus.OK,
+                exchange(HttpMethod.POST, "/api/v1/sessions/" + sessionId + "/close", null, false));
+        assertEquals("FAILED", summary.get("status").asText());
+    }
+
+    // ------------------------------------------------------------------ 4. terminal PAD rejection
+
+    @Test
+    void printAttackFixture_isTerminallyRejectedByPad() throws Exception {
+        UUID sessionId = UUID.fromString(expect(HttpStatus.CREATED,
+                exchange(HttpMethod.POST, "/api/v1/sessions",
+                        sessionBody("RESIDENT"), false)).get("id").asText());
+
+        // Frame 1: PAD flags the printed presentation immediately, but the
+        // verdict needs PAD_CONFIRM_FRAMES (2) consecutive attack frames
+        // before it is terminal — one noisy frame must not kill a session.
+        JsonNode first = postFrame(sessionId, attackB64);
+        assertEquals("retry_passive", first.get("action").asText(), first.toString());
+        assertTrue(first.get("padFlag").asBoolean(), "attack must be flagged on the first frame");
+        assertEquals("PRINTED_PHOTO", first.get("padAttackType").asText());
+
+        // Frame 2: confirmation — immediate terminal reject, before scoring.
+        JsonNode second = postFrame(sessionId, attackB64);
+        assertEquals("reject", second.get("action").asText(), second.toString());
+        assertEquals("COMPLETED", second.get("stage").asText());
+
+        JsonNode after = expect(HttpStatus.OK,
+                exchange(HttpMethod.GET, "/api/v1/sessions/" + sessionId, null, false));
+        assertEquals("FAILED", after.get("status").asText());
+        assertEquals("presentation_attack:PRINTED_PHOTO", after.get("failureReason").asText());
+
+        JsonNode audit = expect(HttpStatus.OK,
+                exchange(HttpMethod.GET, "/api/v1/sessions/" + sessionId + "/audit", null, false));
+        assertTrue(hasEvent(audit, "PAD_REJECTED"), "audit must record the attack: " + audit);
+
+        // Terminal means terminal: the session left ACTIVE, so any further
+        // frame is refused with 409 instead of being evaluated.
+        ObjectNode body = mapper.createObjectNode();
+        body.put("frameBase64", attackB64);
+        JsonNode conflict = expect(HttpStatus.CONFLICT, exchange(HttpMethod.POST,
+                "/api/v1/sessions/" + sessionId + "/frames", body.toString(), false));
+        assertEquals("CONFLICT", conflict.get("error").asText());
+
+        JsonNode summary = expect(HttpStatus.OK,
+                exchange(HttpMethod.POST, "/api/v1/sessions/" + sessionId + "/close", null, false));
+        assertEquals("FAILED", summary.get("status").asText());
+        assertEquals("presentation_attack:PRINTED_PHOTO", summary.get("failureReason").asText());
+    }
+
+    // ------------------------------------------------------------------ 5. error path, real decoder
+
+    @Test
+    void undecodableFrame_returns422ThroughRealImageUtils() throws Exception {
+        UUID sessionId = UUID.fromString(expect(HttpStatus.CREATED,
+                exchange(HttpMethod.POST, "/api/v1/sessions",
+                        sessionBody("RESIDENT"), false)).get("id").asText());
+
+        ObjectNode body = mapper.createObjectNode();
+        body.put("frameBase64", "!!!not-base64!!!");
+        JsonNode error = expect(HttpStatus.UNPROCESSABLE_ENTITY,
+                exchange(HttpMethod.POST, "/api/v1/sessions/" + sessionId + "/frames",
+                        body.toString(), false));
+        assertEquals("INVALID_FRAME", error.get("error").asText());
+    }
+
+    // ------------------------------------------------------------------ 6. window timeout → retry → max-retries reject
+
+    /**
+     * Real-time test of the challenge timeout path: forces the challenge window
+     * to elapse twice with static frames that can never perform the action.
+     *
+     * <p>Covers all three branches in order: {@code continue} while the window
+     * is open (a frame well inside it must not expire the challenge early),
+     * {@code retry_challenge} with a brand-new challenge after the first window
+     * elapses, and terminal {@code reject} with {@code max_retries_exceeded}
+     * after the second.</p>
+     *
+     * <p>Window length comes from {@code mosip.liveness.min-challenge-window-ms}
+     * (see the class javadoc): the same transitions, without 32s of sleeping.
+     * The 15s production default and the 1s absolute clamp are pinned by
+     * {@code DecisionEngineServiceTest}.</p>
+     */
+    @Test
+    @Timeout(60)
+    void supervisorChallengeWindowTimeout_retriesThenRejectsAtMaxRetries() throws Exception {
+        // The policy's window is the deployment floor itself, so the update is
+        // accepted as written; maxRetryCount=2 → one retry, then terminal reject.
+        expect(HttpStatus.OK, exchange(HttpMethod.PUT, "/api/v1/config/SUPERVISOR",
+                "{\"passiveThreshold\":1.0,\"challengeTimeoutMs\":" + WINDOW_MS
+                        + ",\"maxRetryCount\":2}", true));
+
+        UUID sessionId = UUID.fromString(expect(HttpStatus.CREATED,
+                exchange(HttpMethod.POST, "/api/v1/sessions",
+                        sessionBody("SUPERVISOR"), false)).get("id").asText());
+
+        JsonNode last = null;
+        int sent = 0;
+        while ((last == null || !terminal(last.get("action").asText())) && sent < MAX_FRAMES) {
+            last = postFrame(sessionId, frameB64);
+            sent++;
+        }
+        assertEquals("escalate_to_active", last.get("action").asText(), last.toString());
+
+        JsonNode challenge = last.get("challenge");
+        UUID firstId = UUID.fromString(challenge.get("challengeId").asText());
+        String firstType = challenge.get("challengeType").asText();
+        // The challenge was issued while handling the escalation request, so this
+        // is never earlier than issuedAt — a safe base for the window deadline.
+        long firstWindowStart = System.currentTimeMillis();
+
+        // Still inside the window the verdict must be continue: nothing may end
+        // the challenge before its deadline.
+        Thread.sleep(INSIDE_WINDOW_PROBE_MS);
+        assertEquals("continue", validateChallenge(sessionId, firstId).get("action").asText());
+
+        // Window elapsed → attempt failed, retry budget spent, a fresh challenge issued.
+        sleepUntil(firstWindowStart + WINDOW_MS + ELAPSED_MARGIN_MS);
+        JsonNode retry = validateChallenge(sessionId, firstId);
+        assertEquals("retry_challenge", retry.get("action").asText(), retry.toString());
+        UUID secondId = UUID.fromString(retry.get("challenge").get("id").asText());
+        assertNotEquals(firstId, secondId, "retry must issue a brand-new challenge");
+        assertEquals(2, retry.get("challenge").get("attemptNumber").asInt());
+        assertEquals("ISSUED", retry.get("challenge").get("status").asText());
+        String secondType = retry.get("challenge").get("challengeType").asText();
+        assertNotEquals(firstType, secondType, "retry must not repeat the failed action");
+        long secondWindowStart = System.currentTimeMillis();
+
+        // The new challenge gets its own full window.
+        Thread.sleep(INSIDE_WINDOW_PROBE_MS);
+        assertEquals("continue", validateChallenge(sessionId, secondId).get("action").asText());
+
+        // Second window elapsed and retryCount(2) >= maxRetry(2) → terminal reject.
+        sleepUntil(secondWindowStart + WINDOW_MS + ELAPSED_MARGIN_MS);
+        JsonNode rejected = validateChallenge(sessionId, secondId);
+        assertEquals("reject", rejected.get("action").asText(), rejected.toString());
+        assertFalse(rejected.get("passed").asBoolean());
+        assertEquals("FAILED", rejected.get("challenge").get("status").asText());
+        assertNotNull(rejected.get("challenge").get("completedAt"));
+
+        JsonNode after = expect(HttpStatus.OK,
+                exchange(HttpMethod.GET, "/api/v1/sessions/" + sessionId, null, false));
+        assertEquals("FAILED", after.get("status").asText());
+        assertEquals("max_retries_exceeded", after.get("failureReason").asText());
+        assertEquals("COMPLETED", after.get("currentStage").asText());
+        // finalResult is only ever set on pass, so it is absent (NON_NULL) here.
+        assertFalse(after.path("finalResult").asBoolean(false));
+
+        JsonNode audit = expect(HttpStatus.OK,
+                exchange(HttpMethod.GET, "/api/v1/sessions/" + sessionId + "/audit", null, false));
+        assertEquals(2, countEvents(audit, "CHALLENGE_ISSUED"), audit.toString());
+        assertEquals(2, countEvents(audit, "CHALLENGE_FAILED"), audit.toString());
+        assertFalse(hasEvent(audit, "CHALLENGE_PASSED"), audit.toString());
+
+        // Terminal means terminal: the failed challenge cannot be validated again.
+        expect(HttpStatus.CONFLICT, exchange(HttpMethod.POST,
+                "/api/v1/sessions/" + sessionId + "/challenges/validate",
+                validateBody(secondId).toString(), false));
+
+        JsonNode summary = expect(HttpStatus.OK,
+                exchange(HttpMethod.POST, "/api/v1/sessions/" + sessionId + "/close", null, false));
+        assertEquals("FAILED", summary.get("status").asText());
+        assertEquals("max_retries_exceeded", summary.get("failureReason").asText());
+        assertEquals(2, summary.get("totalChallengesIssued").asInt());
+    }
+
+    // ------------------------------------------------------------------ 7. config change audit
+
+    @Test
+    void configChange_isTraceableInTheConfigAuditView() throws Exception {
+        // A policy edit decides who passes liveness, so it is recorded the same
+        // way a decision is: which workflow, which fields moved, under which key.
+        expect(HttpStatus.OK, exchange(HttpMethod.PUT, "/api/v1/config/OPERATOR",
+                "{\"passiveThreshold\":0.93,\"maxRetryCount\":4}", true));
+
+        JsonNode feed = expect(HttpStatus.OK,
+                exchange(HttpMethod.GET, "/api/v1/config/audit?limit=50", null, false));
+        JsonNode entry = firstChangeFor(feed, "OPERATOR");
+        assertNotNull(entry, "the PUT must leave a trace in the audit view: " + feed);
+        assertEquals("CONFIG_CHANGED", entry.get("eventType").asText());
+        assertEquals("UPDATED", entry.get("details").get("action").asText());
+        assertNotNull(entry.get("createdAt"), "an audit entry without a timestamp is not traceable");
+
+        // The key itself must never be stored — only a stable fingerprint.
+        String actor = entry.get("details").get("actor").asText();
+        assertTrue(actor.startsWith("key:"), "expected a key fingerprint, got: " + actor);
+        assertFalse(actor.contains(ADMIN_KEY));
+
+        JsonNode changes = entry.get("details").get("changes");
+        assertEquals(Set.of("passiveThreshold", "maxRetryCount"), fieldNames(changes),
+                "only the fields that moved belong in the diff: " + changes);
+        assertEquals(0.93, changes.get("passiveThreshold").get("to").asDouble(), 1e-9);
+        assertEquals(4, changes.get("maxRetryCount").get("to").asInt());
+        // …and the previous values, so the entry is self-contained.
+        assertNotNull(changes.get("passiveThreshold").get("from"));
+        assertNotNull(changes.get("maxRetryCount").get("from"));
+
+        // Session trails stay session-scoped: an operator-level event has no
+        // session and must never surface inside one.
+        UUID sessionId = UUID.fromString(expect(HttpStatus.CREATED,
+                exchange(HttpMethod.POST, "/api/v1/sessions",
+                        sessionBody("RESIDENT"), false)).get("id").asText());
+        postFrame(sessionId, frameB64);
+        JsonNode sessionAudit = expect(HttpStatus.OK,
+                exchange(HttpMethod.GET, "/api/v1/sessions/" + sessionId + "/audit", null, false));
+        for (JsonNode e : sessionAudit) {
+            assertNotEquals("CONFIG_CHANGED", e.path("eventType").asText(),
+                    "config events must not leak into a session trail: " + sessionAudit);
+        }
+    }
+
+    // ------------------------------------------------------------------ 8. browser-style config PUT
+
+    @Test
+    void browserStyleConfigPut_isAcceptedWithTheAdminKey() throws Exception {
+        String sameOrigin = "http://localhost:" + port;
+        String devServerOrigin = "http://localhost:5173";  // a console on another dev port
+
+        // A browser can only send the admin key cross-origin after a preflight
+        // that advertises the header — if that fails, the console silently can't
+        // save. (allowedOriginPatterns http://localhost:*, credentials off.)
+        HttpHeaders preflight = browserHeaders(devServerOrigin);
+        preflight.set(HttpHeaders.ACCESS_CONTROL_REQUEST_METHOD, "PUT");
+        preflight.set(HttpHeaders.ACCESS_CONTROL_REQUEST_HEADERS, "content-type, x-admin-api-key");
+        RawResponse options = send(HttpMethod.OPTIONS, RESIDENT_CONFIG, null, preflight);
+        assertEquals(200, options.status(), "preflight must be allowed");
+        assertEquals(devServerOrigin, options.header(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN));
+        String allowHeaders = options.header(HttpHeaders.ACCESS_CONTROL_ALLOW_HEADERS);
+        assertNotNull(allowHeaders, "preflight must allow the requested headers");
+        assertTrue(allowHeaders.toLowerCase().contains("x-admin-api-key"), allowHeaders);
+
+        // The console's own call: browser headers + admin key.
+        HttpHeaders save = browserHeaders(sameOrigin);
+        save.add(ADMIN_HEADER, ADMIN_KEY);
+        RawResponse saved = send(HttpMethod.PUT, RESIDENT_CONFIG,
+                "{\"challengeTimeoutMs\":20000}", save);
+        assertEquals(200, saved.status(), saved.body());
+        assertEquals("nosniff", saved.header("X-Content-Type-Options"));
+        JsonNode applied = mapper.readTree(saved.body());
+        assertEquals("RESIDENT", applied.get("workflowType").asText());
+        assertEquals(20000, applied.get("challengeTimeoutMs").asInt());
+
+        // Accepted and applied — so it must also be traceable.
+        JsonNode feed = expect(HttpStatus.OK,
+                exchange(HttpMethod.GET, "/api/v1/config/audit?limit=50", null, false));
+        JsonNode entry = firstChangeFor(feed, "RESIDENT");
+        assertNotNull(entry, "a browser-style PUT must leave an audit entry: " + feed);
+        assertEquals(20000, entry.get("details").get("changes")
+                .get("challengeTimeoutMs").get("to").asInt());
+
+        // Browser headers are not a bypass: the same request without the key is
+        // still refused, and writes nothing.
+        RawResponse noKey = send(HttpMethod.PUT, RESIDENT_CONFIG,
+                "{\"challengeTimeoutMs\":25000}", browserHeaders(sameOrigin));
+        assertEquals(403, noKey.status(), noKey.body());
+        assertEquals("FORBIDDEN", mapper.readTree(noKey.body()).get("error").asText());
+        JsonNode after = expect(HttpStatus.OK,
+                exchange(HttpMethod.GET, "/api/v1/config/RESIDENT", null, false));
+        assertEquals(20000, after.get("challengeTimeoutMs").asInt(),
+                "a rejected PUT must not change the policy");
+
+        // A foreign origin is refused by the CORS processor before the key is
+        // even considered.
+        HttpHeaders foreign = browserHeaders("https://evil.example");
+        foreign.add(ADMIN_HEADER, ADMIN_KEY);
+        RawResponse evil = send(HttpMethod.PUT, RESIDENT_CONFIG,
+                "{\"challengeTimeoutMs\":25000}", foreign);
+        assertEquals(403, evil.status(), evil.body());
+        JsonNode unchanged = expect(HttpStatus.OK,
+                exchange(HttpMethod.GET, "/api/v1/config/RESIDENT", null, false));
+        assertEquals(20000, unchanged.get("challengeTimeoutMs").asInt(),
+                "a cross-origin PUT must not change the policy either");
+    }
+
+    // ------------------------------------------------------------------ 9. published rate-limit budget
+
+    @Test
+    void rateLimitBudget_isPublishedOnLimitedPosts() throws Exception {
+        // What the console's Request budget panel renders: the limiter's state
+        // must reach the client as headers, not just as a 429 after the fact.
+        ResponseEntity<String> created = exchange(HttpMethod.POST, "/api/v1/sessions",
+                sessionBody("RESIDENT"), false);
+        JsonNode session = expect(HttpStatus.CREATED, created);
+        assertEquals("session-create", created.getHeaders().getFirst("X-RateLimit-Bucket"));
+        // The configured limit, not a literal: this class overrides it so the
+        // suite cannot exhaust the shared per-IP bucket. What matters is that
+        // the published value matches what the limiter was configured with —
+        // RateLimitFilterTest is where 30/60 themselves are pinned.
+        assertEquals(String.valueOf(sessionCreateLimit),
+                created.getHeaders().getFirst("X-RateLimit-Limit"));
+        assertNotNull(created.getHeaders().getFirst("X-RateLimit-Remaining"));
+        assertNotNull(created.getHeaders().getFirst("X-RateLimit-Reset"));
+        assertNull(created.getHeaders().getFirst("Retry-After"),
+                "an allowed request must not tell the client to retry");
+
+        UUID sessionId = UUID.fromString(session.get("id").asText());
+        ObjectNode body = mapper.createObjectNode();
+        body.put("frameBase64", frameB64);
+        ResponseEntity<String> framed = exchange(HttpMethod.POST,
+                "/api/v1/sessions/" + sessionId + "/frames", body.toString(), false);
+        expect(HttpStatus.OK, framed);
+        assertEquals("frames", framed.getHeaders().getFirst("X-RateLimit-Bucket"),
+                "frame work has its own budget, separate from session creation");
+        assertEquals(String.valueOf(frameLimit),
+                framed.getHeaders().getFirst("X-RateLimit-Limit"));
+
+        // Unmetered routes stay unmetered, or a client would show a budget for
+        // work that is never limited.
+        ResponseEntity<String> metrics = exchange(HttpMethod.GET, "/api/v1/metrics", null, false);
+        expect(HttpStatus.OK, metrics);
+        assertNull(metrics.getHeaders().getFirst("X-RateLimit-Bucket"));
+
+        // The limiter's tallies must reach /metrics: the two limited posts above
+        // each count as one admitted request (>= because other tests in this
+        // class share the same process).
+        JsonNode reported = expect(HttpStatus.OK,
+                exchange(HttpMethod.GET, "/api/v1/metrics", null, false));
+        assertTrue(reported.get("rateLimitAllowedRequests").asInt() >= 2, reported.toString());
+        assertTrue(reported.get("rateLimitedRequests").asInt() >= 0);
+        assertTrue(reported.get("rateLimitedSessionCreate").asInt() >= 0);
+        assertTrue(reported.get("rateLimitedFrames").asInt() >= 0);
+        assertTrue(reported.get("rateLimitRejectionRate").asDouble() >= 0.0);
+    }
+
+    @Test
+    void forwardedHeadersCannotMintABudget_whenNoProxyIsTrusted() throws Exception {
+        // trust-nobody is the shipped default, so X-Forwarded-For must be noise:
+        // two requests claiming different clients share one per-IP budget. If a
+        // proxy were trusted they would be separate buckets and the counter
+        // would not move — that is exactly what this delta pins down.
+        HttpHeaders spoofed = new HttpHeaders();
+        spoofed.setContentType(MediaType.APPLICATION_JSON);
+        spoofed.set("X-Forwarded-For", "203.0.113.1");
+        RawResponse first = send(HttpMethod.POST, "/api/v1/sessions",
+                sessionBody("RESIDENT"), spoofed);
+        assertEquals(201, first.status(), first.body());
+
+        spoofed.set("X-Forwarded-For", "203.0.113.2");   // a different "client"
+        RawResponse second = send(HttpMethod.POST, "/api/v1/sessions",
+                sessionBody("RESIDENT"), spoofed);
+        assertEquals(201, second.status(), second.body());
+
+        int before = Integer.parseInt(first.header("X-RateLimit-Remaining"));
+        int after = Integer.parseInt(second.header("X-RateLimit-Remaining"));
+        assertEquals(before - 1, after,
+                "a spoofed X-Forwarded-For must not create a second budget: "
+                        + before + " -> " + after);
+    }
+
+    // ------------------------------------------------------------------ helpers
+
+    /**
+     * A browser-shaped request sent through the JDK HTTP client.
+     *
+     * <p>{@code TestRestTemplate} uses {@code HttpURLConnection}, which silently
+     * strips {@code Origin} and {@code Access-Control-Request-*} as restricted
+     * headers — with those gone a preflight is indistinguishable from a plain
+     * same-origin OPTIONS, so this test would pass without ever exercising CORS.
+     * The JDK client sends them verbatim.</p>
+     */
+    private RawResponse send(HttpMethod method, String path, String body, HttpHeaders headers) {
+        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(url(path)));
+        headers.forEach((name, values) -> values.forEach(v -> builder.header(name, v)));
+        builder.method(method.name(), body == null ? HttpRequest.BodyPublishers.noBody()
+                : HttpRequest.BodyPublishers.ofString(body));
+        try {
+            java.net.http.HttpResponse<String> res = java.net.http.HttpClient.newHttpClient()
+                    .send(builder.build(), java.net.http.HttpResponse.BodyHandlers.ofString());
+            return new RawResponse(res.statusCode(), res.headers().map(), res.body());
+        } catch (IOException | InterruptedException e) {
+            if (e instanceof InterruptedException) Thread.currentThread().interrupt();
+            throw new IllegalStateException("browser-style " + method + " " + path + " failed", e);
+        }
+    }
+
+    /** Status, headers and body of a raw browser-style request. */
+    private record RawResponse(int status, Map<String, List<String>> headers, String body) {
+        String header(String name) {
+            for (Map.Entry<String, List<String>> e : headers.entrySet()) {
+                if (name.equalsIgnoreCase(e.getKey()) && !e.getValue().isEmpty()) {
+                    return e.getValue().get(0);
+                }
+            }
+            return null;
+        }
+    }
+
+    private static String sessionBody(String workflow) {
+        return "{\"workflowType\":\"" + workflow + "\",\"deviceId\":\"E2E-CAM\"}";
+    }
+
+    private static boolean terminal(String action) {
+        return "proceed".equals(action) || "reject".equals(action)
+                || "escalate_to_active".equals(action);
+    }
+
+    private static JsonNode firstChangeFor(JsonNode feed, String workflowType) {
+        for (JsonNode entry : feed) {
+            if (workflowType.equals(entry.path("details").path("workflowType").asText())) {
+                return entry;
+            }
+        }
+        return null;
+    }
+
+    private static Set<String> fieldNames(JsonNode changes) {
+        Set<String> names = new LinkedHashSet<>();
+        changes.fieldNames().forEachRemaining(names::add);
+        return names;
+    }
+
+    private static boolean hasEvent(JsonNode audit, String eventType) {
+        return countEvents(audit, eventType) > 0;
+    }
+
+    private static int countEvents(JsonNode audit, String eventType) {
+        int count = 0;
+        for (JsonNode entry : audit) {
+            if (eventType.equals(entry.path("eventType").asText())) count++;
+        }
+        return count;
+    }
+
+    private static void sleepUntil(long deadlineMs) throws InterruptedException {
+        long remaining = deadlineMs - System.currentTimeMillis();
+        if (remaining > 0) Thread.sleep(remaining);
+    }
+
+    private ObjectNode validateBody(UUID challengeId) {
+        ObjectNode body = mapper.createObjectNode();
+        body.put("challengeId", challengeId.toString());
+        ArrayNode frames = body.putArray("framesBase64");
+        frames.add(frameB64).add(frameB64).add(frameB64);
+        return body;
+    }
+
+    private JsonNode validateChallenge(UUID sessionId, UUID challengeId) throws Exception {
+        return expect(HttpStatus.OK, exchange(HttpMethod.POST,
+                "/api/v1/sessions/" + sessionId + "/challenges/validate",
+                validateBody(challengeId).toString(), false));
+    }
+
+    private String url(String path) {
+        return "http://localhost:" + port + path;
+    }
+
+    private JsonNode postFrame(UUID sessionId, String frame) throws Exception {
+        ObjectNode body = mapper.createObjectNode();
+        body.put("frameBase64", frame);
+        return expect(HttpStatus.OK, exchange(HttpMethod.POST,
+                "/api/v1/sessions/" + sessionId + "/frames", body.toString(), false));
+    }
+
+    /**
+     * HTTP call that tolerates both TestRestTemplates: the default one (returns
+     * error responses as ResponseEntity) and one that throws on 4xx/5xx.
+     */
+    private ResponseEntity<String> exchange(HttpMethod method, String path,
+                                            String body, boolean adminKey) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        if (adminKey) headers.add(ADMIN_HEADER, ADMIN_KEY);
+        HttpEntity<String> entity = new HttpEntity<>(body, headers);
+        try {
+            return rest.exchange(url(path), method, entity, String.class);
+        } catch (HttpClientErrorException e) {
+            HttpHeaders errorHeaders = e.getResponseHeaders() != null
+                    ? e.getResponseHeaders() : new HttpHeaders();
+            return new ResponseEntity<>(e.getResponseBodyAsString(), errorHeaders, e.getStatusCode());
+        }
+    }
+
+    /** Headers Chrome sends on a same-origin policy save from the console. */
+    private HttpHeaders browserHeaders(String origin) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set(HttpHeaders.ORIGIN, origin);
+        headers.set(HttpHeaders.REFERER, origin + "/");
+        headers.set(HttpHeaders.ACCEPT, "application/json, text/plain, */*");
+        headers.set("Sec-Fetch-Site", "same-origin");
+        headers.set("Sec-Fetch-Mode", "cors");
+        headers.set("Sec-Fetch-Dest", "empty");
+        headers.set(HttpHeaders.USER_AGENT,
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126 Safari/537.36");
+        return headers;
+    }
+
+    private JsonNode expect(HttpStatus expected, ResponseEntity<String> response) throws Exception {
+        // Every API response — including errors — must carry the hardening headers.
+        assertEquals("nosniff", response.getHeaders().getFirst("X-Content-Type-Options"),
+                "security headers missing on " + response);
+        assertEquals(expected.value(), response.getStatusCode().value(),
+                "unexpected status, body: " + response.getBody());
+        return mapper.readTree(response.getBody());
+    }
+}

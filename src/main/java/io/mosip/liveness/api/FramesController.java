@@ -1,5 +1,7 @@
 package io.mosip.liveness.api;
 
+import io.mosip.liveness.metrics.PipelineTimers;
+
 import io.mosip.liveness.dto.FrameProcessResult;
 import io.mosip.liveness.dto.FrameSubmitRequest;
 import io.mosip.liveness.models.entity.LivenessSession;
@@ -40,12 +42,17 @@ public class FramesController {
                     "Session is not active (status=" + session.getStatus() + ")");
         }
 
-        Mat frame = imageUtils.decodeBase64Frame(req.getFrameBase64());
-        try {
-            return decisionEngine.processFrame(session, frame, imageUtils);
-        } finally {
+        // Timed end to end so the phases have something to be compared against —
+        // see PipelineTimers.TOTAL. Includes the DB round trip, which is why it
+        // is deliberately larger than the sum of the pipeline phases.
+        return PipelineTimers.timed(PipelineTimers.TOTAL, () -> {
+            Mat frame = imageUtils.decodeBase64Frame(req.getFrameBase64());
+            try {
+                return decisionEngine.processFrame(session, frame, imageUtils);
+            } finally {
             frame.release();
             sessionRepo.save(session);
-        }
+            }
+        });
     }
 }

@@ -16,6 +16,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class EffectivePolicyValidatorTest {
 
+    /** Production floor: the configured default, so these cases pin real behaviour. */
+    private static final EffectivePolicyValidator VALIDATOR =
+            new EffectivePolicyValidator(LivenessConfig.MIN_CHALLENGE_WINDOW_MS);
+
     private static EffectivePolicy policy(boolean activeLiveness, double threshold,
                                           int minChallengeCount, long timeoutMs,
                                           java.util.Set<ChallengeType> challenges) {
@@ -27,14 +31,14 @@ class EffectivePolicyValidatorTest {
 
     @Test
     void acceptsAValidPolicy() {
-        assertDoesNotThrow(() -> EffectivePolicyValidator.validate(
+        assertDoesNotThrow(() -> VALIDATOR.validate(
                 policy(true, 0.80, 1, 15_000L, EnumSet.of(ChallengeType.BLINK))));
     }
 
     @Test
     void rejectsAZeroThresholdThatWouldPassEveryFrame() {
         IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
-                () -> EffectivePolicyValidator.validate(
+                () -> VALIDATOR.validate(
                         policy(true, 0.0, 1, 15_000L, EnumSet.of(ChallengeType.BLINK))));
         assertTrue(ex.getMessage().contains("passiveThreshold"));
     }
@@ -42,7 +46,7 @@ class EffectivePolicyValidatorTest {
     @Test
     void rejectsMinChallengeCountLargerThanTheChallengePool() {
         IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
-                () -> EffectivePolicyValidator.validate(
+                () -> VALIDATOR.validate(
                         policy(true, 0.85, 2, 15_000L, EnumSet.of(ChallengeType.BLINK))));
         assertTrue(ex.getMessage().contains("minChallengeCount"));
     }
@@ -50,7 +54,7 @@ class EffectivePolicyValidatorTest {
     @Test
     void rejectsAChallengeWindowBelowTheEngineFloor() {
         IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
-                () -> EffectivePolicyValidator.validate(
+                () -> VALIDATOR.validate(
                         policy(true, 0.80, 1, 8_000L, EnumSet.of(ChallengeType.BLINK))));
         assertTrue(ex.getMessage().contains("challengeTimeoutMs"));
     }
@@ -58,13 +62,13 @@ class EffectivePolicyValidatorTest {
     @Test
     void rejectsAnEmptyChallengePoolWhenActiveLivenessIsEnabled() {
         assertThrows(IllegalArgumentException.class,
-                () -> EffectivePolicyValidator.validate(
+                () -> VALIDATOR.validate(
                         policy(true, 0.80, 0, 15_000L, EnumSet.noneOf(ChallengeType.class))));
     }
 
     @Test
     void acceptsLivenessDisabledWithNoChallenges() {
-        assertDoesNotThrow(() -> EffectivePolicyValidator.validate(
+        assertDoesNotThrow(() -> VALIDATOR.validate(
                 policy(false, 0.80, 0, 15_000L, EnumSet.noneOf(ChallengeType.class))));
     }
 }

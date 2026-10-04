@@ -17,5 +17,7 @@ public enum AuditEventType {
     MAX_RETRIES_EXCEEDED,
     REPEATED_FAILURE_ACTION,
     PAD_BLOCKED,
+    /** Runtime policy edit via PUT /api/v1/config/{workflowType} (no session). */
+    CONFIG_CHANGED,
     INTERNAL_ERROR
 }

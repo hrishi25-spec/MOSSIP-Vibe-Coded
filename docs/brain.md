@@ -47,6 +47,8 @@ The service is designed to run **entirely offline** (no mandatory cloud calls) o
 │   │   ├── haarcascade_frontalface_default.xml  # the Java bindings — without them no
 │   │   │                                   #   frame can ever detect a face)
 │   │   ├── static/index.html               # Browser test console (selfie-mirrored)
+│   │   ├── static/console.css              # Console styles (external — strict CSP)
+│   │   ├── static/console.js               # Console logic (external — strict CSP)
 │   │   └── db/migration/V1__init_schema.sql  # Flyway DB migration
 │   └── test/java/io/mosip/liveness/       # 23 test classes + 3 support files (26 files)
 │
@@ -83,7 +85,7 @@ The service is designed to run **entirely offline** (no mandatory cloud calls) o
 | **Python 3.11+** | `pad_liveness_backend/` | ~1,390 | Original FastAPI reference implementation (kept for comparison) |
 | **SQL** | `V1__init_schema.sql` | ~85 | PostgreSQL schema (Flyway migration) |
 | **YAML** | `application.yml`, `application-dev.yml` | ~60 | Spring Boot configuration |
-| **JavaScript/HTML** | `static/index.html` | ~450 | Single-page browser test console |
+| **JavaScript/HTML** | `static/index.html`, `static/console.css`, `static/console.js` | ~480 | Single-page browser test console (external assets so CSP stays strict) |
 | **Dockerfile** | 2 files | ~20 | Containerization (Java + Python) |
 
 ---
@@ -236,10 +238,13 @@ POST /api/v1/sessions/{sessionId}/challenges/validate
 
 **Challenge window.** A challenge stays open for `challengeTimeoutMs`, with a
 **15-second floor** enforced by the engine regardless of the stored value
-(shortened from 60s at the product's request). A client
+(shortened from 60s at the product's request). The floor is
+`mosip.liveness.min-challenge-window-ms` (default 15 000, hard minimum 1 000 —
+`DecisionEngineService.ABSOLUTE_MIN_CHALLENGE_WINDOW_MS`); lowering it is a test
+seam, production keeps 15s. A client
 should keep polling `/challenges/validate` with the same `challengeId` while the
-response is `continue`, and stop the moment it changes — `static/index.html` is a
-reference implementation of exactly that loop.
+response is `continue`, and stop the moment it changes — `static/console.js`
+(loaded by `static/index.html`) is a reference implementation of exactly that loop.
 
 ### Configuration
 ```
@@ -262,14 +267,22 @@ PUT /api/v1/config/{workflowType}
 | activeLivenessEnabled | boolean | — | true |
 | minChallengeCount | int | ≥ 1 | 1 |
 | challengeTypes | string[] | non-empty | ["blink","smile","turn_left","turn_right"] |
-| challengeTimeoutMs | int | ≥ 1000 (15 000 floor applied at runtime) | 15000 |
+| challengeTimeoutMs | int | ≥ 1000 (floor from `min-challenge-window-ms`, default 15 000) | 15000 |
 | maxRetryCount | int | ≥ 0 | 3 |
 | onRepeatedFailure | string | LOCK\|ESCALATE\|ALLOW_RETRY | LOCK |### Metrics
 ```
 GET /api/v1/metrics
   → OperationalMetrics { totalSessions, passedSessions, failedSessions, activeSessions, passRate, avgPassiveToActiveEscalationRate,
-      avgFramesPerSession, avgChallengesPerSession, livenessRetryRate, livenessFailureRate, padRejectionRate }
+      avgFramesPerSession, avgChallengesPerSession, livenessRetryRate, livenessFailureRate, padRejectionRate,
+      rateLimitAllowedRequests, rateLimitedRequests, rateLimitedSessionCreate, rateLimitedFrames, rateLimitRejectionRate }
 ```
+
+The `rateLimit*` fields come from `RateLimitCounters`, **not** from the
+database: they count what the limiter has admitted and refused per rule
+(`session-create` per IP, `frames` per session) since process start, so they
+reset on restart while the session counters do not. `rateLimitRejectionRate` is
+`rejected / (allowed + rejected)` over the two limited routes, and is `0.0`
+(never `NaN`) when there has been no traffic.
 
 ### Threshold Calibration
 ```
@@ -294,11 +307,23 @@ exist, else the labelled `ProxyPresentationCorpus`). APCER is reported as
 ```
 GET /api/v1/sessions/{sessionId}/audit
   → [ { id, eventType, details: {key: value, ...}, createdAt }, ... ]
+
+GET /api/v1/config/audit?limit=50      # operator view: policy edits, newest first
+  → [ { id, eventType: "CONFIG_CHANGED", workflowType, details: {workflowType, action, actor, changes}, createdAt }, ... ]
+GET /api/v1/config/audit?limit=50&workflowType=RESIDENT   # same, narrowed in SQL via audit_logs.workflow_type (V5)
 ```
 
+`audit_logs.session_id` is nullable (migration V4): `NULL` means an
+operator-level event — currently only `CONFIG_CHANGED`, written in the same
+transaction as the policy `PUT`. A policy edit decides who passes liveness, so it
+is recorded like any decision: the fields that actually moved with their old and
+new values, and a truncated SHA-256 fingerprint of the admin key (never the key).
+Session trails query by session id, so they can never pick one up. See
+`docs/configuration.md` for the payload and the open-read rationale.
+
 **Audit event types written by the HTTP API** (free-form strings stored in
-`audit_logs.event_type`, and what this endpoint actually returns):
-`PAD_REJECTED`, `SESSION_PASSED`, `CHALLENGE_ISSUED`, `CHALLENGE_PASSED`, `CHALLENGE_FAILED`.
+`audit_logs.event_type`, and what these endpoints actually return):
+`PAD_REJECTED`, `SESSION_PASSED`, `CHALLENGE_ISSUED`, `CHALLENGE_PASSED`, `CHALLENGE_FAILED`, `CONFIG_CHANGED`.
 
 **Additional `AuditEventType` enum values** (`audit/AuditEventType.java`) emitted by the
 standalone engine's structured logger — *not* by the HTTP API:
@@ -652,7 +677,8 @@ config_policies       -- id(UUID), workflow_type(UNIQUE), liveness_enabled, pass
                        -- active_liveness_enabled, min_challenge_count, challenge_types(TEXT),
                        -- challenge_timeout_ms, max_retry_count, on_repeated_failure
 
-audit_logs            -- id(UUID), session_id(FK), event_type, details(TEXT), created_at
+audit_logs            -- id(UUID), session_id(FK, NULL for operator events), event_type,
+                       -- details(TEXT), created_at
 ```
 
 Seed data: default policies for RESIDENT, OPERATOR, SUPERVISOR workflows (explicit

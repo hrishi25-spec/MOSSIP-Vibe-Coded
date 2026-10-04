@@ -34,9 +34,11 @@ public class ConfigPolicyUpdate {
 
     private List<String> challengeTypes;
 
-    // Floor matches LivenessConfig.MIN_CHALLENGE_WINDOW_MS / the session-start
-    // snapshot validator: a shorter window reliably times out honest users.
-    @Min(15000) @Max(60000)
+    // The absolute floor is the engine's 1s clamp; the operating floor is
+    // mosip.liveness.min-challenge-window-ms (default 15s), enforced by the
+    // config API and again by EffectivePolicyValidator when a session freezes
+    // its snapshot — a shorter window reliably times out honest users.
+    @Min(1000) @Max(60000)
     private Integer challengeTimeoutMs;
 
     @Min(0) @Max(10)

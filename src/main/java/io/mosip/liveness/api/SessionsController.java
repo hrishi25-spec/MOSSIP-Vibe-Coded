@@ -33,6 +33,7 @@ public class SessionsController {
     private final FrameEventRepository frameEventRepo;
     private final ChallengeRepository challengeRepo;
     private final ConfigService configService;
+    private final EffectivePolicyValidator effectivePolicyValidator;
 
     @PostMapping
     public ResponseEntity<SessionResponse> createSession(@Valid @RequestBody SessionCreateRequest req) {
@@ -42,7 +43,7 @@ public class SessionsController {
         // invalid configuration fails creation rather than being frozen silently.
         EffectivePolicy policy = configService.getEffectivePolicy(
                 configService.toCoreWorkflow(req.getWorkflowType()));
-        EffectivePolicyValidator.validate(policy);
+        effectivePolicyValidator.validate(policy);
 
         LivenessSession session = LivenessSession.builder()
                 .workflowType(req.getWorkflowType())

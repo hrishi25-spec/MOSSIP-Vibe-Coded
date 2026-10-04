@@ -96,13 +96,25 @@ needs to change: implement the base class and update `get_liveness_engine()`
 3. `POST /api/v1/sessions/{id}/challenges/validate` — submit the frame stream
    captured during the challenge. Returns `proceed` / `retry_challenge`
    (new challenge issued) / `reject` (after `max_retry_count` exceeded).
+   A challenge stays open for `challengeTimeoutMs`, raised to a **15 s floor**
+   (`mosip.liveness.min-challenge-window-ms`, hard minimum 1 s) so a shortened
+   policy row cannot fail someone who just needed a moment; polls return
+   `continue` until the window truly elapses, and only then is a retry spent.
 4. `POST /api/v1/sessions/{id}/close` — explicit close + summary.
 5. `GET /api/v1/sessions/{id}/audit` — full structured audit trail.
 6. `GET/PUT /api/v1/config/{workflow_type}` — read/update per-workflow policy
    (threshold, challenge types, timeout, retry count, failure policy) —
-   no redeploy required.
+   no redeploy required. **PUT requires the admin API key** (see
+   [Security](#security)); reads are open. Every successful `PUT` is recorded in
+   the audit trail: `GET /api/v1/config/audit` returns who changed which
+   workflow, which fields moved, and their old → new values.
 7. `GET /api/v1/metrics` — anonymized operational metrics (pass rate, escalation
-   rate, retry rate, PAD rejection rate, etc.).
+   rate, retry rate, PAD rejection rate, etc.) plus rate-limiter tallies:
+   `rateLimitAllowedRequests`, `rateLimitedRequests` and the per-rule split
+   `rateLimitedSessionCreate` / `rateLimitedFrames`, with
+   `rateLimitRejectionRate`. Those four/five come from in-process counters, so
+   they start at zero on restart while the session metrics come from the
+   database.
 
 All decisions are logged to the `audit_logs` table (session created, each
 frame's verdict is in `frame_events`, challenges issued/passed/failed,
@@ -158,7 +170,23 @@ is taken, the build breaks, or the service never becomes healthy.
 real API — no build step and no CDN, so it works fully offline. It creates a
 session, captures webcam frames, runs passive liveness, performs the active
 challenge, and shows the decision log, audit trail and operational metrics side
-by side.
+by side. It also edits the **config policy** per workflow: loads are open `GET`s,
+saving issues a `PUT` with the `X-Admin-API-Key` header — paste
+`MOSIP_ADMIN_API_KEY` into the admin-key field first (kept in the tab's
+sessionStorage only, never logged). The key never sits in the page: the field is
+cleared on blur and after every save, and a hint shows only a **partial mask**
+(`••••••••••••-9f3`) so you can tell which key is loaded without exposing it to a
+screen share or screenshot — **Forget key** drops it from the tab. The console
+also shows the **Request budget** panel: live meters for both limiter budgets
+(how many submissions remain and when the window resets, counting down each
+second), turning amber near the limit and red on a 429 with its retry time — so
+a tester can watch the limiter work instead of only seeing it fail. It also shows
+the **policy change history** — who changed a workflow, which fields
+moved, and their previous and new values — refreshed automatically after each
+save. The policy form has a **dirty-form guard**: edits show an amber "unsaved
+changes" marker, and switching workflow, pressing Load or closing the tab asks
+before discarding them (the workflow select snaps back if you cancel), so a
+tuned threshold can't vanish without a word.
 
 It must be opened at `localhost`: browsers only expose the camera on a secure
 origin, and `localhost` counts as one.
@@ -173,6 +201,32 @@ Requires only **JDK 17+** (verified on JDK 21). No PostgreSQL, no Docker.
 
 # Run with the dev profile: in-memory H2, schema created by Hibernate
 java -jar target/pad-liveness-backend-1.0.0-SNAPSHOT.jar --spring.profiles.active=dev
+```
+
+The default jar is ~209 MB because `org.openpnp:opencv` bundles natives for
+eight platforms and `onnxruntime` bundles four (plus a 54 MB macOS `.dSYM`).
+For linux x86_64 targets — CI runners and the Docker image — build the slim
+variant, which keeps the Java bindings and the one native it actually loads:
+
+```bash
+./mvnw clean package -DskipTests -Pslim
+# -> target/pad-liveness-backend-1.0.0-SNAPSHOT-slim.jar  (~92 MB)
+
+java -jar target/pad-liveness-backend-1.0.0-SNAPSHOT-slim.jar --spring.profiles.active=dev
+```
+
+`clean` matters: `-Pslim` unpacks the filtered natives into `target/classes`, so
+a slim build followed by a plain build would leave a linux-only `.so` ahead of
+the full library on the classpath. The slim jar runs the real pipeline on linux
+x86_64; on any other OS the natives are simply absent and the app degrades to
+`engine: "unavailable"` rather than failing to start.
+
+To reproduce what CI does before publishing, boot the jar and check it serves:
+
+```bash
+./scripts/smoke-jar.sh
+# {"status":"ok","service":"MOSIP Face Liveness & PAD Service","engine":"available"}
+# packaged jar booted and reports the engine available
 ```
 
 Then check it is up:
@@ -249,6 +303,83 @@ curl -s -X POST localhost:8000/api/v1/sessions/$SESSION_ID/challenges/validate \
 
 # 3. Check the audit trail
 curl -s localhost:8000/api/v1/sessions/$SESSION_ID/audit
+```
+
+## Security
+
+Hardening built into the service (no extra dependencies):
+
+- **Admin key on policy updates** — `PUT /api/v1/config/{workflow}` requires
+  the `X-Admin-API-Key` header matching `MOSIP_ADMIN_API_KEY`. The check is
+  **fail-closed**: if the key is not configured, config updates are refused
+  (403), so an unauthenticated caller can never lower `passiveThreshold` and
+  defeat PAD. Reads stay open for clients.
+  ```bash
+  curl -X PUT localhost:8000/api/v1/config/RESIDENT \
+    -H "Content-Type: application/json" \
+    -H "X-Admin-API-Key: $MOSIP_ADMIN_API_KEY" \
+    -d '{"passiveThreshold": 0.85}'
+  ```
+- **Policy edits are audited** — the key alone must not be enough to weaken
+  liveness silently. Each successful `PUT` writes a `CONFIG_CHANGED` entry in
+  the *same transaction* as the policy update: which workflow, which fields
+  actually moved with old → new values, `CREATED` vs `UPDATED`, and a truncated
+  SHA-256 fingerprint of the key (never the key). Rejected requests record
+  nothing. Read it back with `GET /api/v1/config/audit?limit=50`, or in the
+  console's **Policy change history** panel.
+  ```bash
+  curl -s "localhost:8000/api/v1/config/audit?limit=5"
+  # one workflow only — filtered in the database, not in the browser
+  curl -s "localhost:8000/api/v1/config/audit?workflowType=OPERATOR"
+  ```
+- **Security headers on every response** (`SecurityHeadersFilter`):
+  `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+  `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy`,
+  `Permissions-Policy` (camera self-only), and a strict
+  `Content-Security-Policy` (`script-src 'self'`, `style-src 'self'`,
+  `frame-ancestors 'none'`) — the browser console now loads its script/style
+  from `static/console.js` / `static/console.css` so no `unsafe-inline` is
+  needed. Swagger UI is exempt from CSP only (its webjar boots inline).
+- **Request size limits** — POST/PUT bodies over `MAX_REQUEST_BODY_BYTES`
+  (default 24 MB) are rejected with 413 before reaching a controller; frame
+  DTOs cap each frame (`@Size`) and the decode step enforces payload and
+  dimension caps (decompression-bomb guard) and downscales oversized frames
+  to ≤1280 px before analysis.
+- **Rate limiting** (`RateLimitFilter`, in-memory fixed windows, no extra
+  dependency) — `POST /api/v1/sessions` is capped per client IP (default
+  30/min) and `POST .../frames` + `POST .../challenges/validate` share a
+  per-session budget (default 60 per 10 s), so one client or one session
+  cannot flood the service. Over-limit requests get `429` + `Retry-After` in
+  the standard error shape, before any body parsing or DB work. GETs are never
+  limited. **Budget headers**: every limited route also returns
+  `X-RateLimit-Bucket` (`session-create` / `frames`), `X-RateLimit-Limit`,
+  `X-RateLimit-Remaining` and `X-RateLimit-Reset` (seconds into the window) —
+  on *allowed* requests too, so a client can pace itself instead of only
+  discovering the limiter through a failure (they are in CORS
+  `Access-Control-Expose-Headers` for a console on another dev port). Tune via
+  `mosip.security.rate-limit.*` (or `SESSION_CREATE_LIMIT`, `FRAME_LIMIT`,
+  `RATE_LIMIT_ENABLED`).
+  **Behind a proxy or Docker**: the per-IP budget keys on the socket address by
+  default, so every client behind NAT collapses onto one budget. Set
+  `TRUSTED_PROXIES` to the proxy's IP or CIDR (e.g. `172.16.0.0/12,127.0.0.1`)
+  and the limiter reads `X-Forwarded-For` (right-to-left, skipping trusted hops)
+  then `X-Real-IP` — **only** from those peers. Forwarded headers from anyone
+  else are ignored, so a client cannot mint extra budgets by sending them; never
+  list a range that includes untrusted addresses. Frame budgets are keyed by
+  session id and are unaffected.
+- **CORS** is an allow-list of `localhost` origins via `allowedOriginPatterns`
+  (wildcard ports actually match now), methods limited to GET/POST/PUT,
+  credentials off.
+- **Error responses** never include stack traces or exception messages
+  (`server.error.include-*=never` plus the structured `GlobalExceptionHandler`).
+- **Containers**: the image runs as a non-root user, the JVM is capped with
+  `-XX:MaxRAMPercentage=50 -XX:+UseSerialGC -XX:+ExitOnOutOfMemoryError`, and
+  PostgreSQL is published on `127.0.0.1` only.
+
+Set a strong key before exposing the service:
+
+```bash
+export MOSIP_ADMIN_API_KEY=$(openssl rand -hex 32)
 ```
 
 ## Notes on the spec's non-functional requirements

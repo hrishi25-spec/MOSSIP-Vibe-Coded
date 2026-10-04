@@ -1,0 +1,228 @@
+name: CI
+
+# Unit and integration suites run as two parallel jobs. Both jobs share the
+# same checkout/JDK setup; the suite split is a surefire -Dtest filter, so no
+# extra plugins or pom changes are needed.
+on:
+  push:
+    # Every branch push runs the suites and builds the jar. Tag pushes (v*)
+    # additionally publish a GitHub Release with the jar attached.
+    branches: ['**']
+    tags: ['v*']
+
+# Least privilege by default: the workflow only needs to read the repo. The
+# release job overrides this with contents: write, scoped to that one job.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.suite }} tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      # Run both to completion — a unit failure must not cancel the
+      # integration run (and vice versa); both results are wanted.
+      fail-fast: false
+      matrix:
+        include:
+          - suite: Unit
+            maven_tests: "!LivenessPipelineIntegrationTest,!PostgresSchemaTest"
+          - suite: Integration
+            maven_tests: "LivenessPipelineIntegrationTest"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # JDK 17 matches <java.version> in pom.xml; cache: maven keeps the
+      # dependency cache (~/.m2/repository) between runs so CI stays fast.
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      # Tests are self-contained: the JPA slice swaps in embedded H2, OpenCV
+      # natives and the ONNX model ship inside the dependency jars, so no
+      # database or external service is needed on the runner. The single
+      # quotes keep the surefire '!' exclusion literal for the shell.
+      - name: Run ${{ matrix.suite }} tests
+        run: ./mvnw --batch-mode test -Dtest='${{ matrix.maven_tests }}'
+
+  # Packages the Spring Boot executable jar, but only after BOTH test jobs
+  # passed (needs: test waits for every matrix leg), so a red build never
+  # publishes an artifact.
+  #
+  # Skipped on tag pushes: the release job below builds and smoke tests its own
+  # jar (jobs get separate runners and no shared filesystem, so it could not
+  # reuse this one), and running both would package twice for nothing.
+  package:
+    name: Package executable jar
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: test
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      # Tests already ran in the test jobs, so skip them here; spring-boot
+      # repackage turns the build output into the runnable fat jar.
+      - name: Package
+        run: ./mvnw --batch-mode -DskipTests package
+
+      # Boot the jar we just built and prove it serves traffic. The test jobs
+      # run against target/classes with the full ~/.m2 classpath, so nothing
+      # they do can catch a packaging-only regression — a fat jar that lost its
+      # OpenCV natives, a wrong Start-Class, a truncated repackage all ship
+      # green and only break for whoever runs the artifact.
+      #
+      # Deliberately not branch-gated (unlike the upload below): this is the
+      # check that makes gating the upload safe to begin with.
+      #
+      # Lives in a script, not inline, because the release job runs it too and
+      # it is runnable locally with ./scripts/smoke-jar.sh.
+      - name: Smoke test the packaged jar
+        run: ./scripts/smoke-jar.sh
+
+      # The glob matches exactly one file — the executable fat jar
+      # (the classifier-less repackaged artifact; *.jar.original excluded).
+      # The jar is ~200 MB (bundled OpenCV natives + ONNX model), so retention
+      # is kept short to stay inside the artifact storage quota.
+      #
+      # Only the default branch publishes. Every feature-branch push still
+      # builds the jar (that is the packaging check), but uploading from all
+      # of them would spend the repo-wide artifact quota on commits nobody
+      # downloads. The ref is compared against the repository's own default
+      # branch, so it keeps working if the default branch is ever renamed
+      # instead of hardcoding "main" here.
+      - name: Upload jar
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/upload-artifact@v4
+        with:
+          name: pad-liveness-backend-jar
+          path: target/pad-liveness-backend-*.jar
+          if-no-files-found: error
+          retention-days: 7
+
+  # The schema gate — the only job that compares the entities against the Flyway
+  # migrations on the database that actually ships.
+  #
+  # Everything else in this workflow runs on H2 with ddl-auto: create-drop, so
+  # Hibernate builds the schema *from the entities* and Flyway never runs. That
+  # hides a whole class of drift: a column an entity declares but no migration
+  # creates, a column too narrow for the values, an enum stored as a number.
+  # Green CI, broken production — while production is PostgreSQL, the one
+  # database never exercised.
+  #
+  # A service container rather than Testcontainers: the PostgreSQL JDBC driver
+  # and flyway-database-postgresql are already dependencies, so this adds no new
+  # test libraries. It runs in parallel with the suites rather than after them —
+  # it is an independent concern and gives a fast signal.
+  schema:
+    name: PostgreSQL schema gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: mosip
+          POSTGRES_PASSWORD: change_me
+          POSTGRES_DB: pad_liveness
+        ports:
+          - 5432:5432
+        # Fail fast if Postgres never comes up, instead of timing out the job
+        # on a connection that was never going to work.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Opt-in switch read by @EnabledIfEnvironmentVariable, plus the same
+      # POSTGRES_* variables application.yml already reads — the test uses the
+      # production datasource configuration, not a test-only one.
+      MOSIP_PG_TEST: 'true'
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: '5432'
+      POSTGRES_USER: mosip
+      POSTGRES_PASSWORD: change_me
+      POSTGRES_DB: pad_liveness
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Validate migrations against the entities
+        run: ./mvnw --batch-mode test -Dtest='PostgresSchemaTest'
+
+  # Pushing a version tag (v*) publishes the jar to a GitHub Release. This is
+  # the deliberate, human-initiated publish event — unlike the per-push artifact
+  # upload, which is ephemeral and branch-gated.
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: test
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    # Scoped to this job alone: the rest of the workflow stays read-only.
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      # Release assets are the same artifact CI publishes elsewhere, so they go
+      # through the identical gate: green tests, then a real boot.
+      - name: Package
+        run: ./mvnw --batch-mode -DskipTests package
+
+      - name: Smoke test the packaged jar
+        run: ./scripts/smoke-jar.sh
+
+      # `gh release create` fails if the release already exists, which is what a
+      # re-pushed or moved tag looks like. Upload --clobber replaces the asset
+      # in that case, so a retried run converges instead of wedging. GH_TOKEN is
+      # the automatic per-run token, so there is no secret to configure or leak.
+      - name: Attach jar to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -uo pipefail
+          JAR=$(ls target/pad-liveness-backend-*.jar | grep -v -- '-slim\.jar$')
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG exists — replacing the asset"
+            gh release upload "$TAG" "$JAR" --clobber
+          else
+            # No --notes-start-tag: it errors when there is no previous release,
+            # which would make the very first tag unpublishable. Plain
+            # --generate-notes picks the previous release automatically when
+            # one exists and starts from scratch when it does not.
+            gh release create "$TAG" "$JAR" \
+              --title "$TAG" \
+              --generate-notes
+          fi

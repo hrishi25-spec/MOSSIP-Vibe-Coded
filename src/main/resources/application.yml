@@ -2,6 +2,24 @@ server:
   # Matches the Dockerfile EXPOSE / docker-compose port mapping and the README examples.
   port: ${SERVER_PORT:8000}
 
+  # Never leak stack traces or exception messages to clients; the
+  # GlobalExceptionHandler already returns structured, safe error bodies.
+  error:
+    include-stacktrace: never
+    include-message: never
+
+  # Gzip JSON/HTML — lower bandwidth for thin client connections.
+  compression:
+    enabled: true
+    mime-types: application/json,text/html,text/css,application/javascript
+    min-response-size: 1024
+
+  tomcat:
+    # The service is I/O-light (frames arrive at a few Hz per session), so a
+    # small thread pool is plenty and saves native memory on low-end hosts.
+    threads:
+      max: ${TOMCAT_THREADS_MAX:50}
+
 spring:
   application:
     name: pad-liveness-backend
@@ -13,8 +31,10 @@ spring:
     password: ${POSTGRES_PASSWORD:change_me}
     driver-class-name: org.postgresql.Driver
     hikari:
-      maximum-pool-size: 10
-      minimum-idle: 2
+      # 5 connections are ample for the few writes per frame/challenge and
+      # keep PostgreSQL-side memory small on low-end hosts.
+      maximum-pool-size: ${DB_POOL_SIZE:5}
+      minimum-idle: 1
       idle-timeout: 300000
 
   # ---- JPA / Hibernate ----
@@ -46,6 +66,28 @@ spring:
 
 # ---- MOSIP Liveness Engine ----
 mosip:
+  security:
+    # Admin key required by PUT /api/v1/config/* — fail-closed: when blank,
+    # config updates are refused (see README, Security section).
+    admin-api-key: ${MOSIP_ADMIN_API_KEY:}
+    # Reject POST/PUT requests whose Content-Length exceeds this (24 MB).
+    max-request-body-bytes: ${MAX_REQUEST_BODY_BYTES:25165824}
+    # Flood protection (RateLimitFilter): fixed windows, in-memory.
+    rate-limit:
+      enabled: ${RATE_LIMIT_ENABLED:true}
+      # POST /api/v1/sessions per client IP
+      session-create-limit: ${SESSION_CREATE_LIMIT:30}
+      session-create-window-ms: 60000
+      # POST frames + challenges/validate per session id (shared budget)
+      frame-limit: ${FRAME_LIMIT:60}
+      frame-window-ms: 10000
+      # Peers whose X-Forwarded-For / X-Real-IP may be believed, as a
+      # comma-separated list of IPs or CIDR blocks (empty = trust nobody, and
+      # the per-IP budget then keys on the socket address). Set this to the
+      # reverse proxy or Docker gateway that fronts the service, e.g.
+      # "172.16.0.0/12,127.0.0.1". Never use a range that includes untrusted
+      # addresses — a client can send these headers itself.
+      trusted-proxies: ${TRUSTED_PROXIES:}
   liveness:
     # Passive liveness scorer:
     #   auto      - MiniFASNet-V2 (ONNX, bundled in resources/models) when it
@@ -63,6 +105,10 @@ mosip:
     passive-window-frames: 7
     min-challenge-count: 2
     challenge-timeout-ms: 15000
+    # Floor that a per-workflow challengeTimeoutMs is raised to (hard minimum
+    # 1000ms). 15s keeps a person who needed a moment from failing an attempt;
+    # raising it only ever makes the flow more patient.
+    min-challenge-window-ms: ${MIN_CHALLENGE_WINDOW_MS:15000}
     max-retries: 2
 
 # ---- Logging ----

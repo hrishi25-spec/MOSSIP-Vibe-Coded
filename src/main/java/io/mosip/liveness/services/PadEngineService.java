@@ -2,6 +2,7 @@ package io.mosip.liveness.services;
 
 import io.mosip.liveness.core.PadAttackType;
 import io.mosip.liveness.core.PadVerdict;
+import io.mosip.liveness.metrics.PipelineTimers;
 import org.opencv.core.*;
 import org.opencv.imgproc.Imgproc;
 import org.springframework.stereotype.Service;
@@ -21,6 +22,10 @@ public class PadEngineService {
      * Analyse a single frame and return a presentation-attack verdict.
      */
     public PadVerdict detect(Mat frame, ImageUtils imageUtils) {
+        return PipelineTimers.timed(PipelineTimers.PAD_HEURISTIC, () -> detectInternal(frame, imageUtils));
+    }
+
+    private PadVerdict detectInternal(Mat frame, ImageUtils imageUtils) {
         Mat gray = new Mat();
         Imgproc.cvtColor(frame, gray, Imgproc.COLOR_BGR2GRAY);
         Mat grayFloat = new Mat();
