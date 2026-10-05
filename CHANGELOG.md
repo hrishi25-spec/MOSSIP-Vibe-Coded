@@ -360,15 +360,17 @@ All notable changes to this project will be documented in this file.
   the smallest `challengeTimeoutMs` the config API accepts). It is the guard
   against a shortened or legacy policy row failing someone who needed a moment,
   so raising it only ever makes the flow more patient. Lowering it is a test
-  seam: the e2e timeout case now runs 3 s windows instead of 2 × 15 s, cutting
-  that test 34.4 s → 10.0 s and the integration class 54 s → 30 s (93 s → 70 s
-  in a cold, isolated CI-job run) with identical assertions. The 15 s default and
-  the 1 s clamp stay pinned by `DecisionEngineServiceTest` (3 new cases, no
-  sleeps). Everything else the class spends is real work — ~15 s of OpenCV face
-  detection and ONNX scoring across 25 frames plus a ~45 s Spring context load
-  (Hibernate DDL 7.8 s, OpenCV natives 6.4 s, Tomcat + beans 7.1 s); Flyway
-  cannot replace that DDL on H2 because the migrations are Postgres-specific
-  (`TIMESTAMPTZ`), so dev/integration boots keep `ddl-auto: create-drop`
+  seam: the e2e timeout case now runs 3 s windows instead of 2 × 15 s, cutting  that test 34.4 s → 10.0 s and the integration class 54 s → 30 s
+  (93 s → 70 s in a cold, isolated CI-job run) with identical
+  assertions. The 15 s default and
+  the 1 s clamp stay pinned by `DecisionEngineServiceTest` (3 new
+  cases, no sleeps). Everything else the class spends is real work —
+  ~15 s of OpenCV face detection and ONNX scoring across 25 frames
+  plus a ~37–43 s Spring context load (per-phase breakdown in the
+  Performance section below);
+  Flyway cannot replace that DDL on H2 because the migrations are
+  Postgres-specific (`TIMESTAMPTZ`), so dev/integration boots keep
+  `ddl-auto: create-drop`
 - OpenCV (and the MiniFASNet model) now load **lazily on first use** — no boot
   step waits for either. `PadLivenessApplication.main()` still starts an
   `opencv-warmup` daemon thread before `SpringApplication.run()` so the ~65 MB
@@ -443,6 +445,30 @@ All notable changes to this project will be documented in this file.
 - Console: single reused capture canvas instead of one per frame, bounded
   decision-log size, health polling paused while the tab is hidden
 - Server: Hikari pool 10 → 5, Tomcat threads 200 → 50, response gzip enabled
+- Startup cost breakdown, measured on the packaged jar (dev profile,
+  cold native cache, `BufferingApplicationStartup` across 412 steps,
+  three runs; wall clock 37–43 s, of which **~4 s is JVM launch and
+  fat-jar class loading** before Spring's clock even starts — the
+  "process running for" figure minus Spring's own seconds). The
+  remaining ~30 s of `spring.context.refresh` is, by self time:
+  Hibernate SessionFactory construction **~7.8 s** (probed with
+  `ddl-auto=none`: unchanged at 7.76 s, so it is the metamodel
+  build, **not** DDL — the old "Hibernate DDL 7.8 s" attribution
+  was wrong), `@Configuration` class parsing **~6 s** (135 classes
+  read through the jar-in-jar loader, ~45 ms each), Spring Data
+  repository proxies **~4 s** (the first repository pays the shared
+  JPA metamodel, ~2.4 s), the dev-only H2 console bean ~1.5 s,
+  Tomcat creation ~1 s, and the rest spread over ~400 smaller steps
+  (springdoc, AOP, handler mappings, post-processors). The slim jar
+  (94 MB) shows the same distribution — artifact size is not a
+  factor — and OpenCV natives no longer appear on the main-thread
+  timeline at all: the warm-up thread overlaps completely. The real
+  boot-time bottleneck is Hibernate's metamodel and Spring's own
+  config parsing; candidates for future work are
+  `hibernate.temp.use_jdbc_metadata_defaults=false` (skips JDBC
+  metadata introspection), excluding unused auto-configurations
+  (135 parsed classes), and an AppCDS archive for the pre-Spring
+  class loading
 
 ## [Unreleased] - 2026-10-01
 
