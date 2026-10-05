@@ -255,6 +255,39 @@ All notable changes to this project will be documented in this file.
   409 when the failed challenge is re-validated
 
 ### Changed
+- **CI now builds, boots and publishes both jars.** The package job is a two-leg
+  matrix: the full cross-platform jar (~200 MB) and the slim linux-x86_64 one
+  (~94 MB). Both legs boot and must report `engine: available` — that is what
+  catches a dependency bump which quietly breaks the slim profile's native
+  filter, which otherwise ships a jar that boots fine and then rejects every
+  frame. The run summary reports both sizes, and `scripts/check-jar-size.sh`
+  fails the build when a jar outgrows its budget (245 MiB full, 110 MiB slim):
+  a jar that quietly re-adds a platform breaks no test, it just doubles
+  artifact storage.
+- **Artifact names follow the primary download.** `pad-liveness-backend-jar` is
+  now the **slim** jar — it is what CI runners, the Docker image and most
+  deployments run, and it is the small one. The cross-platform jar moves to
+  `pad-liveness-backend-full-jar`, one click away for macOS/Windows consumers.
+  Each leg writes its own name because upload-artifact v4 treats a name as
+  immutable across jobs: a shared name fails the second leg with 409.
+- **Uploads also fire on `v*` tags** (the default branch used to be the only
+  publisher), so a release tag gets a versioned artifact independent of which
+  branch is the default. `pull_request` is now a trigger as well: branches run
+  the identical gate before merging, and the upload guard keeps PRs — forks
+  included — out of artifact storage.
+- **The Docker image is built from the slim profile**, and the jar is copied
+  with `--chown` rather than a `chown -R` layer that stored the same file twice:
+  **620 MB → 294 MB** of layers, measured. The COPY is pinned to the `-slim`
+  classifier because a slim build leaves the thin jar beside the repackaged one,
+  which made the old `*.jar` glob ambiguous. `scripts/smoke-docker.sh` builds the
+  image, boots the container and asserts `/health`, the unprivileged user, and
+  reports the layer total — the image path had no coverage at all before, so a
+  broken `COPY` or base image shipped green.
+- `scripts/smoke-jar.sh` takes `SMOKE_JAR=full|slim` (default `full`), selects
+  with globs instead of `ls | grep`, and says which jar it is about to boot.
+  Its container sibling asserts `status: ok` rather than `engine: available`:
+  Alpine is musl and the OpenCV native is glibc-linked, so a correct image serves
+  the API with frame processing unavailable by design.
 - Rate-limited requests are now counted per rule and reported by
   `GET /api/v1/metrics`: `rateLimitedRequests` (total refused) with the split
   `rateLimitedSessionCreate` / `rateLimitedFrames`, plus

@@ -101,14 +101,24 @@ jobs:
           - artifact: full
             profile: ''
             jar: target/pad-liveness-backend-*.jar
-            artifact_name: pad-liveness-backend-jar
+            # The historical name goes to the slim build — it is what CI, the
+            # Docker image and most deployments actually run, and it is the
+            # small one. The cross-platform jar stays one click away under its
+            # own name for macOS/Windows consumers.
+            artifact_name: pad-liveness-backend-full-jar
+            smoke_jar: full
+            # ~200 MiB today; the ceiling leaves ~20% for a patch release but
+            # trips the moment a whole extra platform (~50-100 MB) sneaks back.
+            max_mib: 245
           # `clean` is not optional for this leg: the slim profile unpacks the
           # kept natives into target/classes, which repackage embeds verbatim,
           # so a non-clean build could leave linux-only natives in the full jar.
           - artifact: slim
             profile: '-Pslim'
             jar: target/pad-liveness-backend-*-slim.jar
-            artifact_name: pad-liveness-backend-slim-jar
+            artifact_name: pad-liveness-backend-jar
+            smoke_jar: slim
+            max_mib: 110
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -133,19 +143,40 @@ jobs:
       # StackOverflowError), a truncated repackage all ship green and only break
       # for whoever runs the artifact.
       #
-      # Only the full leg here: smoke-jar.sh boots the non-slim jar by name, and
-      # that is the artifact people deploy. The slim leg is build-and-upload
-      # for now — it does boot and report the engine available on linux-x86_64
-      # (verified locally), it just does not have its own smoke step yet.
+      # Both legs boot and must report `engine: available`. That is the point
+      # of running it for the slim jar too: nothing else in this workflow can
+      # tell a working -Pslim build from one whose native filter quietly stopped
+      # matching, and that failure ships as a jar that boots fine and then
+      # rejects every frame.
       #
       # Deliberately not branch-gated (unlike the upload below): this is the
       # check that makes gating the upload safe to begin with.
       #
       # Lives in a script, not inline, because the release job runs it too and
-      # it is runnable locally with ./scripts/smoke-jar.sh.
+      # it is runnable locally with ./scripts/smoke-jar.sh (SMOKE_JAR=full|slim).
       - name: Smoke test the packaged jar
-        if: matrix.artifact == 'full'
+        env:
+          SMOKE_JAR: ${{ matrix.smoke_jar }}
         run: ./scripts/smoke-jar.sh
+
+      # A jar that outgrows its budget is a regression nobody else notices: the
+      # build is still green, every download is just slower, and artifact
+      # storage quietly doubles. Red here, on the run that caused it.
+      - name: Enforce jar size ceiling
+        run: ./scripts/check-jar-size.sh '${{ matrix.jar }}' ${{ matrix.max_mib }} '${{ matrix.artifact }} jar'
+
+      # Both legs report, so the run summary shows the pair on every build and a
+      # payload that creeps up over months is visible in the history rather than
+      # being discovered when storage fills.
+      - name: Report jar size
+        run: |
+          BYTES=$(wc -c < ${{ matrix.jar }})
+          HUMAN=$(numfmt --to=iec --suffix=B "$BYTES" 2>/dev/null || echo "$BYTES bytes")
+          {
+            echo "### ${{ matrix.artifact }} jar — $HUMAN"
+            echo
+            echo "Artifact: \`${{ matrix.artifact_name }}\` · budget ${{ matrix.max_mib }} MiB"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # Publishes on the default branch and on v* tags: a versioned artifact
       # must not depend on which branch is the default. Pull requests build
@@ -167,6 +198,41 @@ jobs:
           path: ${{ matrix.jar }}
           if-no-files-found: error
           retention-days: 7
+
+  # The image is a separate delivery path from the jar: the Dockerfile's COPY,
+  # its Alpine base, the unprivileged user and the JVM flags exist nowhere else
+  # in this repository, so no other job can see a mistake in any of them. Builds
+  # from the slim profile and boots the container against /health.
+  #
+  # It packages its own slim jar rather than downloading the package job's
+  # artifact: that upload is deliberately branch-gated, so on a pull request
+  # there would be nothing to download and the check would silently skip.
+  #
+  # The container assertion is `status: ok`, not `engine: available` — Alpine is
+  # musl and the OpenCV native is glibc-linked, so a correct image serves the API
+  # with frame processing unavailable by design. The engine assertion lives in
+  # the jar smoke tests, which run on glibc.
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Package the slim jar the image is built from
+        run: ./mvnw --batch-mode clean package -DskipTests -Pslim
+
+      - name: Build the image and smoke test the container
+        run: ./scripts/smoke-docker.sh
 
   # The schema gate — the only job that compares the entities against the Flyway
   # migrations on the database that actually ships.

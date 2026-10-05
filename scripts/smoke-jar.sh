@@ -14,7 +14,15 @@
 # Note /health always answers status "ok", so a 200 alone proves nothing: the
 # assertion is `engine: available`, which comes from
 # AppConfig.isOpenCvAvailable() and therefore fails unless the natives were
-# bundled AND load on this platform.
+# bundled AND load on this platform. That is the whole point of running it for
+# BOTH jars: a dependency bump that quietly breaks the slim profile (the
+# excluded native filter stops matching, a classifier moves the .so) otherwise
+# ships a jar that boots fine and cannot see a single frame.
+#
+# SMOKE_JAR picks which jar to boot — `full` (default, the cross-platform
+# deployable) or `slim` (linux-x86_64 only, what CI and the Docker image use).
+# Both get the same engine assertion, because both are supposed to have a
+# working engine on this platform.
 #
 # Exits non-zero with the tail of the application log on any failure.
 set -uo pipefail
@@ -26,11 +34,44 @@ set -uo pipefail
 PORT="${SMOKE_PORT:-8081}"
 PROFILE="${SMOKE_PROFILE:-dev}"
 LOG="${SMOKE_LOG:-/tmp/app.log}"
+WHICH_JAR="${SMOKE_JAR:-full}"
 
-# The -slim classifier is excluded so a build that produced both jars (see the
-# `slim` profile in pom.xml) still smoke tests the real deployable.
-JAR=$(ls target/pad-liveness-backend-*.jar | grep -v -- '-slim\.jar$')
-echo "smoke testing: $JAR"
+case "$WHICH_JAR" in
+  full|slim) ;;
+  *)
+    echo "::error::SMOKE_JAR must be 'full' or 'slim', got '$WHICH_JAR'"
+    exit 2
+    ;;
+esac
+
+# Globs rather than `ls | grep`: the file names are fixed, and nullglob turns
+# "nothing matched" into an empty array instead of the literal pattern, so a
+# missing jar reports itself instead of booting a file that does not exist.
+shopt -s nullglob
+ALL_JARS=( target/pad-liveness-backend-*.jar )
+shopt -u nullglob
+
+if [ "$WHICH_JAR" = "slim" ]; then
+  shopt -s nullglob
+  JARS=( target/pad-liveness-backend-*-slim.jar )
+  shopt -u nullglob
+else
+  # The -slim classifier is excluded here so a build that produced both jars
+  # (see the `slim` profile in pom.xml) still boots the real deployable.
+  JARS=()
+  for jar in "${ALL_JARS[@]}"; do
+    case "$jar" in *-slim.jar) ;; *) JARS+=( "$jar" ) ;; esac
+  done
+fi
+
+if [ "${#JARS[@]}" -eq 0 ]; then
+  echo "::error::no jar matching the '$WHICH_JAR' profile in target/ — build it first"
+  echo "         full: ./mvnw clean package -DskipTests"
+  echo "         slim: ./mvnw clean package -DskipTests -Pslim"
+  exit 1
+fi
+JAR="${JARS[0]}"
+echo "smoke testing ($WHICH_JAR): $JAR"
 
 # Output goes to a file, not this script's stdout: a backgrounded JVM holding
 # the caller's pipe can keep the calling step alive long after the check is done.

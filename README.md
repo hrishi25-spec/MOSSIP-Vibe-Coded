@@ -224,10 +224,26 @@ x86_64; on any other OS the natives are simply absent and the app degrades to
 To reproduce what CI does before publishing, boot the jar and check it serves:
 
 ```bash
-./scripts/smoke-jar.sh
+./scripts/smoke-jar.sh                 # the full jar (default)
+SMOKE_JAR=slim ./scripts/smoke-jar.sh  # the slim jar — CI boots both
 # {"status":"ok","service":"MOSIP Face Liveness & PAD Service","engine":"available"}
 # packaged jar booted and reports the engine available
+
+./scripts/check-jar-size.sh 'target/pad-liveness-backend-*-slim.jar' 110 'slim jar'
+# slim jar: 89 MiB / 110 MiB budget
 ```
+
+Both jars get the same `engine: available` assertion, because both are supposed
+to have a working engine on linux x86_64. That is what catches a dependency bump
+which quietly breaks the slim profile's native filter: the jar still builds, still
+boots, and then rejects every frame.
+
+**Artifacts from CI.** Every run publishes two, on the default branch and on `v*`
+tags: `pad-liveness-backend-jar` — the slim linux-x86_64 build, which is the
+primary download and the one the Docker image is built from — and
+`pad-liveness-backend-full-jar` for macOS/Windows consumers. The run summary
+reports each jar's size, and a jar that outgrows its budget fails the build rather
+than quietly doubling artifact storage.
 
 Then check it is up:
 
@@ -276,8 +292,25 @@ A real face passes the pipeline end to end:
 ### 6. With Docker (alternative)
 
 ```bash
+# The image is built from the slim profile, so package it first:
+./mvnw clean package -DskipTests -Pslim
+
 cp .env.example .env      # edit credentials as needed
 docker compose up --build
+```
+
+The image drops the natives for platforms a container can never run, which takes
+it from ~620 MB to ~294 MB of layers. The base is Alpine (musl) and the OpenCV
+native is glibc-linked, so frame processing stays unavailable inside the container
+— the API, config/audit, rate limiting and the console all serve normally. Use
+the slim **jar** on a glibc host when you need the engine.
+
+To check the image path the same way CI does:
+
+```bash
+./scripts/smoke-docker.sh
+# health: {"status":"ok",...,"engine":"unavailable"}
+# image size: 293 MiB of layers (runs as 'mosip')
 ```
 
 API available at `http://localhost:8000`, docs at `http://localhost:8000/swagger-ui.html`.
