@@ -317,8 +317,34 @@ jobs:
 
       # Release assets are the same artifact CI publishes elsewhere, so they go
       # through the identical gate: green tests, then a real boot.
-      - name: Package
-        run: ./mvnw --batch-mode -DskipTests package
+      #
+      # The tag is the version: `v1.0.1` builds as 1.0.1, so the jar's
+      # manifest and file name — and therefore the release asset — match
+      # the release instead of reading 1.0.0-SNAPSHOT. `${revision}` is
+      # the pom's CI-friendly version property; every other build keeps
+      # the snapshot default. The assertions below exist because a failed
+      # stamp is otherwise silent: the build still succeeds and publishes
+      # a SNAPSHOT-named asset.
+      - name: Package (version stamped from the tag)
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -uo pipefail
+          VERSION="${TAG#v}"
+          ./mvnw --batch-mode -DskipTests -Drevision="$VERSION" package
+
+          JAR="target/pad-liveness-backend-$VERSION.jar"
+          if [ ! -f "$JAR" ]; then
+            echo "::error::expected $JAR — the tag version was not stamped into the build"
+            exit 1
+          fi
+          MANIFEST_VERSION=$(unzip -p "$JAR" META-INF/MANIFEST.MF \
+            | sed -n 's/^Implementation-Version: //p' | tr -d '\r')
+          if [ "$MANIFEST_VERSION" != "$VERSION" ]; then
+            echo "::error::manifest reports '$MANIFEST_VERSION', expected '$VERSION'"
+            exit 1
+          fi
+          echo "stamped $TAG as $VERSION (manifest Implementation-Version: $MANIFEST_VERSION)"
 
       - name: Smoke test the packaged jar
         run: ./scripts/smoke-jar.sh
@@ -333,7 +359,20 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -uo pipefail
-          JAR=$(ls target/pad-liveness-backend-*.jar | grep -v -- '-slim\.jar$')
+          # Globs, not `ls | grep`: nullglob turns "nothing matched" into
+          # an empty array, so a missing jar reports itself instead of
+          # handing gh an empty argument.
+          shopt -s nullglob
+          JARS=( target/pad-liveness-backend-*.jar )
+          shopt -u nullglob
+          JAR=""
+          for jar in "${JARS[@]}"; do
+            case "$jar" in *-slim.jar) ;; *) JAR="$jar" ;; esac
+          done
+          if [ -z "$JAR" ]; then
+            echo "::error::no full (non-slim) jar in target/ — package it first"
+            exit 1
+          fi
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "release $TAG exists — replacing the asset"

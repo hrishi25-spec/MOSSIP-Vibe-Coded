@@ -200,18 +200,21 @@ All notable changes to this project will be documented in this file.
   for whoever ran the artifact. `/health` always answers `status: ok`, so the
   200 proves nothing on its own — the assertion is on `engine`, which reflects
   whether the natives actually loaded. Pushing a **version tag (`v*`) now also
-  publishes that same jar to a GitHub Release**: the `release` job re-packages,
-  smoke tests it, and attaches it with `gh release create` (falling back to
+  publishes that same jar to a GitHub Release**: the `release` job
+  re-packages **with the tag's version stamped in** — `v1.0.1` builds
+  as `1.0.1`, so the jar's manifest and the asset name match the
+  release instead of reading `1.0.0-SNAPSHOT` — then smoke tests it
+  and attaches it with `gh release create` (falling back to
   `gh release upload --clobber` when the release already exists, so a re-pushed
   tag converges instead of failing). It carries `contents: write` scoped to
   that one job — the rest of the workflow stays read-only — and authenticates
   with the automatic per-run `GITHUB_TOKEN`, so no secret must be configured.
-  The per-push artifact upload is untouched: on a tag push `github.ref` is not
-  the default branch, so it is skipped and the jar is not stored twice.
+  The per-push artifact upload still fires on tag pushes (its guard
+  includes `v*`), and the release job builds its own stamped copy —
+  CI jobs have no shared filesystem, so the two never exchange files.
   `--notes-start-tag` is deliberately omitted because it errors when there is
   no previous release, which would make the very first tag unpublishable.
-  The `package` job is skipped on tag pushes since the release job builds its
-  own jar anyway and CI jobs have no shared filesystem. The smoke test moved
+  The smoke test moved
   from inline YAML into `scripts/smoke-jar.sh` so both jobs share it and it
   stays runnable locally
 - `LivenessPipelineIntegrationTest` — boots the full app with H2 (dev profile)
@@ -255,6 +258,14 @@ All notable changes to this project will be documented in this file.
   409 when the failed challenge is re-validated
 
 ### Changed
+- **Release assets carry the tag version.** `v1.0.1` now builds as
+  `1.0.1` — the pom switched to Maven's CI-friendly `${revision}`
+  property (default `1.0.0-SNAPSHOT`, so every other build keeps its
+  familiar artifact name), overridden only in the release job. The job
+  asserts the stamp landed, because a silent miss would still build
+  green and publish a SNAPSHOT-named asset. The attach step's
+  `ls | grep` also became a nullglob loop, clearing the last
+  actionlint warning
 - **CI now builds, boots and publishes both jars.** The package job is a two-leg
   matrix: the full cross-platform jar (~200 MB) and the slim linux-x86_64 one
   (~94 MB). Both legs boot and must report `engine: available` — that is what

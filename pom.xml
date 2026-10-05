@@ -13,7 +13,12 @@
 
   <groupId>io.mosip.liveness</groupId>
   <artifactId>pad-liveness-backend</artifactId>
-  <version>1.0.0-SNAPSHOT</version>
+  <!-- CI-friendly version: resolves to the <revision> property below
+       unless overridden on the command line (-Drevision=...), which is
+       how the release job stamps the tag's version into the jar. Every
+       other build keeps the snapshot default, so local artifacts and
+       start.sh keep their familiar name. -->
+  <version>${revision}</version>
   <packaging>jar</packaging>
   <name>MOSIP Face Liveness &amp; PAD Service (FastAPI-style Spring Boot)</name>
   <description>Face liveness detection and Presentation Attack Detection (PAD) for MOSIP Registration Client workflows: resident registration, operator authentication, and supervisor authentication.</description>
@@ -21,6 +26,7 @@
   <properties>
     <java.version>17</java.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <revision>1.0.0-SNAPSHOT</revision>
   </properties>
 
   <dependencies>
