@@ -77,8 +77,16 @@ mosip:
     # same canonical form (tamper-detecting, not tamper-proof) and
     # GET /api/v1/config/audit/verify reports hmac: false so the weaker mode
     # is visible rather than assumed. Keep it stable: verification uses the
-    # same key as writing, so rotating it flags every entry as broken.
+    # same key as writing, so rotating it without the previous secret flags
+    # historical entries as broken.
     audit-hmac-secret: ${MOSIP_AUDIT_HMAC_SECRET:}
+    # Previous secret accepted by verification alongside the current secret;
+    # app writes always use the current secret. rotationWindowOpen reports
+    # whether this is set, and retiredKeyHashes reports whether any rows need it.
+    # audit_logs rows are immutable, so keep this configured while historical
+    # hashes need it: this app has no re-key/archive operation yet. Must differ
+    # from the current secret and is rejected when set alone.
+    audit-hmac-previous-secret: ${MOSIP_AUDIT_HMAC_PREVIOUS_SECRET:}
     # Reject POST/PUT requests whose Content-Length exceeds this (24 MB).
     max-request-body-bytes: ${MAX_REQUEST_BODY_BYTES:25165824}
     # Flood protection (RateLimitFilter): fixed windows, in-memory.

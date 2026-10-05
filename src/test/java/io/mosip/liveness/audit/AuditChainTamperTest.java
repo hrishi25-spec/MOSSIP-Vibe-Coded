@@ -17,6 +17,7 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -58,7 +59,10 @@ class AuditChainTamperTest {
     private static final AuditChainKey UNKEYED = new AuditChainKey("");
 
     /** A secret the database does not hold — production's configuration. */
-    private static final AuditChainKey KEYED = new AuditChainKey("e2e-audit-hmac-secret-0123456789");
+    private static final String KEYED_SECRET = "e2e-audit-hmac-secret-0123456789";
+    private static final AuditChainKey KEYED = new AuditChainKey(KEYED_SECRET);
+    /** The secret the trail is rotated onto. */
+    private static final String ROTATED = "rotated-audit-hmac-secret-0123456789";
 
     /** Strictly increasing, so ordering by created_at is unambiguous. */
     private static java.time.OffsetDateTime nextTimestamp() {
@@ -97,6 +101,19 @@ class AuditChainTamperTest {
             previous = append(key, previous, "0." + (70 + i)).getEntryHash();
         }
         return previous;
+    }
+
+    /** Appends a further batch onto an existing head, as a later edit would. */
+    private void continueChain(AuditChainKey key, String previous, int entries, int from) {
+        for (int i = 0; i < entries; i++) {
+            previous = append(key, previous, "0." + (70 + from + i)).getEntryHash();
+        }
+    }
+
+    /** The stored hash of the newest entry — the next entry's {@code prev_hash}. */
+    private String chainHead() {
+        List<AuditLog> entries = chain();
+        return entries.get(entries.size() - 1).getEntryHash();
     }
 
     private List<AuditLog> chain() {
@@ -232,6 +249,84 @@ class AuditChainTamperTest {
         assertEquals(AuditChain.GENESIS, first.getPrevHash());
         assertEquals(head, first.getEntryHash());
         assertTrue(AuditChain.verify(chain(), UNKEYED).isEmpty());
+    }
+
+    @Test
+    @DisplayName("rotation keeps the trail verifying across the secret change")
+    void rotationVerifiesOldAndNewEntriesTogether() {
+        // Written with the old secret, then the operator rotates. Entries before
+        // the rotation are on the retired key; new ones go on the current key.
+        seedChain(KEYED, 2);
+        AuditChainKey rotated = new AuditChainKey(ROTATED, KEYED_SECRET);
+        continueChain(rotated, chainHead(), 2, 2);
+        // Re-read through the JPA converter, as /audit/verify does after a
+        // process restart. This catches canonicalization drift that a
+        // first-level-cache-only check would miss.
+        repo.flush();
+        entityManager.clear();
+        assertEquals(4, chain().size());
+
+        // The overlap is what makes the rotation possible at all: without it the
+        // two old entries would be unreproducible the moment the secret changed.
+        AuditChain.Verification verification = AuditChain.verifyChain(chain(), rotated);
+        assertTrue(verification.intact(), "a rotation window must not break the chain");
+        assertTrue(verification.retiredKeyHashes(),
+                "the operator has to be told the trail still holds retired-key hashes");
+
+        // Without the overlap — same chain, old secret simply gone — the same
+        // rows break, which is the behaviour the window exists to soften.
+        assertTrue(AuditChain.verify(chain(), new AuditChainKey(ROTATED)).isPresent(),
+                "dropping the retired secret breaks what the window was preserving");
+    }
+
+    @Test
+    @DisplayName("reports retired-key rows even when an earlier row breaks the chain")
+    void retiredKeyUseIsFoundAfterFirstBreak() {
+        seedChain(KEYED, 2);
+        AuditChainKey rotated = new AuditChainKey(ROTATED, KEYED_SECRET);
+        continueChain(rotated, chainHead(), 2, 2);
+
+        AuditLog first = chain().get(0);
+        jdbc.update("UPDATE audit_logs SET details = ? WHERE id = ?",
+                "{\"workflowType\":\"RESIDENT\",\"action\":\"UPDATED\",\"changes\":{\"passiveThreshold\":{\"from\":0.8,\"to\":0.01}}}",
+                first.getId());
+        entityManagerClear();
+
+        AuditChain.Verification verification = AuditChain.verifyChain(chain(), rotated);
+        assertEquals(0, verification.breakInfo().orElseThrow().index());
+        assertTrue(verification.retiredKeyHashes(),
+                "later historical rows still prove the retired secret is needed");
+    }
+
+    @Test
+    @DisplayName("application writes use the current secret during rotation")
+    void applicationWriterUsesOnlyTheCurrentSecret() {
+        // The configured application writer always hashes with the current
+        // key. This does not prevent a holder of the previous key from
+        // calculating HMACs outside the application.
+        AuditChainKey rotating = new AuditChainKey(ROTATED, KEYED_SECRET);
+        assertNotEquals(rotating.hash("entry"),
+                new AuditChainKey(KEYED_SECRET).hash("entry"),
+                "writing must use the current secret, never the retired one");
+        assertEquals(AuditChainKey.Match.RETIRED,
+                rotating.match("entry", new AuditChainKey(KEYED_SECRET).hash("entry")));
+        assertEquals(AuditChainKey.Match.CURRENT,
+                rotating.match("entry", rotating.hash("entry")));
+        assertEquals(AuditChainKey.Match.NONE,
+                rotating.match("entry", new AuditChainKey("some-other-secret-0123456789")
+                        .hash("entry")));
+    }
+
+    @Test
+    @DisplayName("a fully re-keyed chain reports no retired hashes")
+    void rekeyedChainNeedsNoWindow() {
+        seedChain(KEYED, 2);
+        // Every entry written under the current secret: the window is open but
+        // unused, which is the state to report — not a stale flag.
+        AuditChain.Verification verification = AuditChain.verifyChain(chain(),
+                new AuditChainKey(KEYED_SECRET, KEYED_SECRET + "-old"));
+        assertTrue(verification.intact());
+        assertFalse(verification.retiredKeyHashes());
     }
 
     @Test

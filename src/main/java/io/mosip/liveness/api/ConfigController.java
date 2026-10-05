@@ -342,7 +342,13 @@ public class ConfigController {
         // operator would take "intact" as stronger than it is: it only says a
         // database writer cannot rebuild this trail.
         result.put("hmac", auditChainKey.isKeyed());
-        Optional<AuditChain.Break> broken = AuditChain.verify(chain, auditChainKey);
+        AuditChain.Verification verification = AuditChain.verifyChain(chain, auditChainKey);
+        Optional<AuditChain.Break> broken = verification.breakInfo();
+        // Distinguish the configured overlap from historical hashes that
+        // still require the previous key. Immutable rows cannot be re-keyed
+        // in place, so both states matter to an operator.
+        result.put("rotationWindowOpen", auditChainKey.isRotating());
+        result.put("retiredKeyHashes", verification.retiredKeyHashes());
         result.put("intact", broken.isEmpty());
         broken.ifPresent(b -> {
             result.put("breakIndex", b.index());

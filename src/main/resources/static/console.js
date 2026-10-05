@@ -768,8 +768,70 @@
   $("cfg-audit-workflow").addEventListener("change", () =>
     loadConfigAudit().catch(e => cfgStatus(e.message, false)));
 
+  // ---------- chain integrity ----------
+  // Live badge in the header: whether the config audit chain verifies and
+  // whether the previous key is still accepted. The details distinguish that
+  // setting from historical entries that still need the previous key.
+  // GET /config/audit/verify is an open read, so no admin key is needed.
+  function truncateHash(h) {
+    return h ? h.slice(0, 8) + "…" + h.slice(-8) : "—";
+  }
+
+  async function refreshAuditVerify() {
+    try {
+      const v = await api("/config/audit/verify");
+      const pill = $("pill-chain");
+      if (v.intact) {
+        if (v.rotationWindowOpen) {
+          pill.textContent = "chain: intact · rotation window open";
+          pill.className = "pill warn";
+        } else {
+          pill.textContent = "chain: intact";
+          pill.className = "pill ok";
+        }
+      } else {
+        pill.textContent = "chain: BROKEN";
+        pill.className = "pill bad";
+      }
+      const pre = $("chain-details");
+      const rotation = !v.rotationWindowOpen
+        ? "closed"
+        : v.retiredKeyHashes
+          ? "window OPEN — entries still on the retired key"
+          : v.intact
+            ? "window OPEN — no entries need the retired key"
+            : "window OPEN — historical use is unknown while the chain is broken";
+      const lines = [
+        "intact:     " + (v.intact ? "yes" : "NO"),
+        "hmac:       " + (v.hmac ? "HMAC-SHA-256 (keyed)" : "SHA-256 (unkeyed fallback)"),
+        "entries:    " + v.chainedEntries,
+        "rotation:   " + rotation,
+        "head hash:  " + truncateHash(v.headHash)
+      ];
+      if (!v.intact && v.breakIndex !== undefined) {
+        lines.push("");
+        lines.push("break at index " + v.breakIndex + " (id: " + (v.breakEntryId || "—") + "):");
+        lines.push("  stored hash:   " + truncateHash(v.storedHash));
+        lines.push("  recomputed:    " + truncateHash(v.recomputedHash));
+        lines.push("  " + (v.contentChanged
+          ? "→ content changed — the row no longer hashes to its stored entry_hash (edited)"
+          : "→ linkage broken — the row's prev_hash points at a missing entry (deleted)"));
+        lines.push("  expected prev: " + truncateHash(v.expectedPrevHash));
+        lines.push("  stored prev:   " + truncateHash(v.storedPrevHash));
+      }
+      pre.textContent = lines.join("\n");
+    } catch (e) {
+      $("pill-chain").textContent = "chain: unreachable";
+      $("pill-chain").className = "pill bad";
+      $("chain-details").textContent = "Failed to verify the chain: " + e.message;
+    }
+  }
+
+  $("btn-chain-refresh").addEventListener("click", () => refreshAuditVerify());
+
   refreshHealth();
   refreshMetrics();
+  refreshAuditVerify();
   // First policy load is a plain open GET — no key needed.
   loadConfig().catch(e => cfgStatus(e.message, false));
   // The change history loads with the page too, so the fingerprint
@@ -777,9 +839,14 @@
   // are visible at a glance, not only after clicking refresh.
   // Same open GET as the policy read; no key needed.
   loadConfigAudit().catch(e => cfgStatus(e.message, false));
-  // Skip health polling while the tab is hidden — no reason to spend CPU/battery
+  // Skip background polling while the tab is hidden — no reason to spend CPU/battery
   // refreshing a console nobody is looking at.
-  setInterval(() => { if (!document.hidden) refreshHealth(); }, 15000);
+  setInterval(() => {
+    if (!document.hidden) {
+      refreshHealth();
+      refreshAuditVerify();
+    }
+  }, 15000);
   // Tick the budget countdown even when idle — no requests needed.
   setInterval(() => { if (!document.hidden && rlState.size) renderBudget(); }, 1000);
 })();

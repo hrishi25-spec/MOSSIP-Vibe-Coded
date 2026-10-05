@@ -79,7 +79,8 @@ cannot recompute a single link:
 ```bash
 export MOSIP_AUDIT_HMAC_SECRET=$(openssl rand -hex 32)
 curl -s localhost:8000/api/v1/config/audit/verify
-# {"eventType":"CONFIG_CHANGED","chainedEntries":5,"headHash":"…","hmac":true,"intact":true}
+# {"eventType":"CONFIG_CHANGED","chainedEntries":5,"headHash":"…","hmac":true,
+#  "rotationWindowOpen":false,"retiredKeyHashes":false,"intact":true}
 ```
 
 | `hmac` | meaning |
@@ -87,17 +88,31 @@ curl -s localhost:8000/api/v1/config/audit/verify
 | `true` | Entries are HMAC-keyed. A database writer who edits rows cannot rebuild the chain; verification reports the first entry whose stored hash the secret does not produce. |
 | `false` | **Documented fallback**: no secret configured, so the hash is plain SHA-256. Tamper-*detecting* only — a database writer can rebuild the trail. The mode is reported so this state is never mistaken for the keyed one. |
 
-Two operational consequences, both deliberate:
+If a **keyed** chain needs to move to a new secret, set
+`MOSIP_AUDIT_HMAC_SECRET` to the new value and
+`MOSIP_AUDIT_HMAC_PREVIOUS_SECRET` to the old value. Writes use the new key;
+verification accepts either. `/api/v1/config/audit/verify` reports
+`rotationWindowOpen` while the previous key is configured and
+`retiredKeyHashes` when any historical entries still need it. The console
+shows both states in the chain badge and details.
 
-- **Keep the secret stable.** Verification uses the same key as writing, so a
-  rotated or missing secret makes every stored hash unreproducible and
-  `/audit/verify` reports a break at the first entry with `contentChanged:
-  true`. That is the intended, loud behaviour — restoring the secret clears it.
-  Accepting the weaker key instead would let a downgrade pass unnoticed.
-- **The mode applies to the whole chain.** Chains written before the secret was
-  configured verify under the fallback; once it is set, every existing entry
-  reports as broken until the chain is rewritten under the new mode. The
-  canonical form is unchanged, so nothing needs migrating at the format level.
+The rows are immutable, so this repository does not re-key old entries. If
+`retiredKeyHashes` is true, keep the previous secret available or the chain
+will fail at its first old-key entry. Clearing the previous secret is safe only
+when `retiredKeyHashes` is false. A future key retirement process needs a
+separately trusted archive or re-key protocol; this overlap does not retire a
+key that must still verify historical data.
+
+The previous secret remains accepted by verification while configured, so
+treat it as a live verification key. Anyone who obtains it can calculate
+old-key HMACs outside the application. Do not use the overlap as a substitute
+for protecting the secret.
+
+Moving from the unkeyed SHA-256 fallback to HMAC is separate: the previous-key
+setting cannot make old SHA-256 rows verify under HMAC. Those rows will report
+as broken unless they are migrated through a trusted process. Keep the active
+secret stable across restarts, and never fall back to unkeyed verification for
+a chain that was written with HMAC.
 
 The hash is computed **before** the INSERT: `id` is assigned by the database at
 persist time and `createdAt` by `@PrePersist`, and the immutability triggers

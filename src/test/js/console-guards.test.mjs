@@ -183,6 +183,14 @@ const POLICY = {
 const fetchCalls = [];
 let confirmAnswer = false;
 let hangFrames = false;   // when set, frame POSTs never answer (check in flight)
+let chainVerify = {
+  intact: true,
+  hmac: true,
+  chainedEntries: 2,
+  rotationWindowOpen: false,
+  retiredKeyHashes: false,
+  headHash: "a".repeat(64)
+};
 
 // Sample policy-change history: one weakening edit (HIGH), one benign
 // edit (LOW), and one written before the risk classification existed
@@ -243,6 +251,7 @@ async function fetch(url, options = {}) {
   });
   if (url === "/health") return respond({ status: "UP", engine: "available" });
   if (url === "/api/v1/metrics") return respond({ framesProcessed: 1 });
+  if (url === "/api/v1/config/audit/verify") return respond(chainVerify);
   if (url.startsWith("/api/v1/config/audit")) return respond(AUDIT);
   if (url.startsWith("/api/v1/config/")) {
     if (method === "PUT") return respond({ saved: true });
@@ -329,6 +338,43 @@ assert(status().textContent.includes("Loaded RESIDENT policy"),
 assert(!isDirtyShown(), "a freshly loaded form is not dirty");
 assert(diff().hidden === true, "the diff panel starts hidden");
 assert($id("cfg-workflow").value === "RESIDENT", "the workflow select starts on RESIDENT");
+
+section("config audit chain badge");
+const chainPill = () => $id("pill-chain");
+const chainDetails = () => $id("chain-details").textContent;
+assert(getFetch("/api/v1/config/audit/verify").length === 1,
+    "the console loads chain verification on startup");
+assert(chainPill().textContent === "chain: intact" && chainPill().className.includes("ok"),
+    "an intact chain gets a green header badge");
+assert(chainDetails().includes("rotation:   closed"),
+    "the details panel shows a closed rotation window");
+
+chainVerify = { ...chainVerify, rotationWindowOpen: true };
+$id("btn-chain-refresh").dispatch("click");
+await settle();
+assert(chainPill().textContent.includes("rotation window open")
+    && chainPill().className.includes("warn"),
+    "an open rotation window turns the badge amber");
+assert(chainDetails().includes("window OPEN — no entries need the retired key"),
+    "the details distinguish an unused previous key from a closed window");
+
+chainVerify = { ...chainVerify, retiredKeyHashes: true };
+$id("btn-chain-refresh").dispatch("click");
+await settle();
+assert(chainDetails().includes("window OPEN — entries still on the retired key"),
+    "the details explain that entries still need the retired key");
+
+chainVerify = { ...chainVerify, intact: false, retiredKeyHashes: false, breakIndex: 0,
+  breakEntryId: "audit-1", storedHash: "b".repeat(64), recomputedHash: "c".repeat(64),
+  storedPrevHash: "GENESIS", expectedPrevHash: "GENESIS", contentChanged: true };
+$id("btn-chain-refresh").dispatch("click");
+await settle();
+assert(chainPill().textContent === "chain: BROKEN" && chainPill().className.includes("bad"),
+    "a broken chain gets a red header badge");
+assert(chainDetails().includes("break at index 0") && chainDetails().includes("content changed"),
+    "the details panel identifies the first broken entry");
+assert(chainDetails().includes("historical use is unknown while the chain is broken"),
+    "a broken chain does not claim that the previous key is unused");
 
 section("change history loads with the page (item 24)");
 // No click on #btn-cfg-audit has happened yet: the fingerprint of the

@@ -1,23 +1,37 @@
 package io.mosip.liveness;
 
+import io.mosip.liveness.audit.AuditChain;
+import io.mosip.liveness.audit.AuditChainKey;
+import io.mosip.liveness.audit.AuditEventType;
+import io.mosip.liveness.crud.AuditLogRepository;
 import io.mosip.liveness.crud.LivenessSessionRepository;
+import io.mosip.liveness.models.entity.AuditLog;
 import io.mosip.liveness.models.entity.LivenessSession;
 import io.mosip.liveness.models.enums.LivenessStage;
 import io.mosip.liveness.models.enums.SessionStatus;
 import io.mosip.liveness.models.enums.WorkflowType;
+import org.junit.jupiter.api.Test;
+import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
 import org.flywaydb.core.api.MigrationVersion;
 import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.core.env.Environment;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.jdbc.core.JdbcTemplate;
+import jakarta.persistence.EntityManager;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
+import java.time.OffsetDateTime;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -39,17 +53,30 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * and the production target is PostgreSQL, which is the one database that
  * never gets tested.</p>
  *
- * <p>Runs only when {@code MOSIP_PG_TEST=true}. CI sets that on the
- * {@code schema} job, which also provides the database. Everywhere else it is
- * skipped, so a plain {@code ./mvnw test} still needs no services.</p>
- *
- * <p>The database is configured through the same {@code POSTGRES_*} variables
- * {@code application.yml} already uses — no test-only datasource properties,
- * so the test exercises the real production configuration.</p>
+ * <p>Testcontainers starts an isolated PostgreSQL for the class, so the gate
+ * runs locally and in CI without a preconfigured service or shared database.
+ * It skips automatically when Docker is unavailable, leaving the ordinary
+ * H2-only suite usable on machines without a container runtime.</p>
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
-@EnabledIfEnvironmentVariable(named = "MOSIP_PG_TEST", matches = "true")
+@Testcontainers(disabledWithoutDocker = true)
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE, properties = {
+        "spring.jpa.hibernate.ddl-auto=validate",
+        "spring.flyway.enabled=true"
+})
 class PostgresSchemaTest {
+
+    @Container
+    private static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16")
+            .withDatabaseName("pad_liveness")
+            .withUsername("mosip")
+            .withPassword("change_me");
+
+    @DynamicPropertySource
+    static void postgresProperties(DynamicPropertyRegistry properties) {
+        properties.add("spring.datasource.url", POSTGRES::getJdbcUrl);
+        properties.add("spring.datasource.username", POSTGRES::getUsername);
+        properties.add("spring.datasource.password", POSTGRES::getPassword);
+    }
 
     @Autowired
     private DataSource dataSource;
@@ -59,6 +86,12 @@ class PostgresSchemaTest {
 
     @Autowired
     private LivenessSessionRepository sessions;
+
+    @Autowired
+    private AuditLogRepository auditLogs;
+
+    @Autowired
+    private EntityManager entityManager;
 
     @Autowired
     private Environment environment;
@@ -159,5 +192,58 @@ class PostgresSchemaTest {
         sessions.flush();
         assertTrue(sessions.findById(saved.getId()).isEmpty());
         assertEquals(UUID.class, reloaded.getId().getClass());
+    }
+
+    @Test
+    @DisplayName("verifies old and current audit keys after a PostgreSQL round-trip")
+    void keyedAuditChainSurvivesRotationAndReload() {
+        String previousSecret = "postgres-audit-old-key-0123456789";
+        String currentSecret = "postgres-audit-current-key-0123456789";
+        AuditChainKey previous = new AuditChainKey(previousSecret);
+        AuditChainKey rotating = new AuditChainKey(currentSecret, previousSecret);
+        OffsetDateTime firstTime = OffsetDateTime.now().withNano(0);
+
+        AuditLog oldEntry = appendAudit(previous, AuditChain.GENESIS, firstTime, "0.75");
+        appendAudit(rotating, oldEntry.getEntryHash(), firstTime.plusSeconds(1), "0.70");
+
+        // Force the JSON converter and PostgreSQL timestamp mapping to run, as
+        // they do between a write and a later /audit/verify request.
+        entityManager.clear();
+        List<AuditLog> chain = auditLogs.findByEventTypeAndEntryHashIsNotNullOrderByCreatedAtAsc(
+                AuditEventType.CONFIG_CHANGED.name());
+
+        assertEquals(2, chain.size());
+        AuditChain.Verification verification = AuditChain.verifyChain(chain, rotating);
+        assertTrue(verification.intact(), "old and current key hashes must keep the chain intact");
+        assertTrue(verification.retiredKeyHashes(), "the old row must be reported as still needed");
+    }
+
+    private AuditLog appendAudit(AuditChainKey key, String previousHash,
+                                 OffsetDateTime createdAt, String threshold) {
+        Map<String, Object> change = new LinkedHashMap<>();
+        change.put("from", 0.80);
+        change.put("to", Double.parseDouble(threshold));
+        Map<String, Object> changes = new LinkedHashMap<>();
+        changes.put("passiveThreshold", change);
+        Map<String, Object> risk = new LinkedHashMap<>();
+        risk.put("level", "HIGH");
+        risk.put("reasons", List.of("passiveThreshold lowered"));
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("workflowType", "RESIDENT");
+        details.put("action", "UPDATED");
+        details.put("actor", "key:9f2c1a7b4e0d");
+        details.put("sourceIp", "127.0.0.1");
+        details.put("changes", changes);
+        details.put("risk", risk);
+
+        AuditLog entry = AuditLog.builder()
+                .eventType(AuditEventType.CONFIG_CHANGED.name())
+                .workflowType(WorkflowType.RESIDENT)
+                .details(details)
+                .prevHash(previousHash)
+                .createdAt(createdAt)
+                .build();
+        entry.setEntryHash(AuditChain.hashOf(entry, key));
+        return auditLogs.saveAndFlush(entry);
     }
 }

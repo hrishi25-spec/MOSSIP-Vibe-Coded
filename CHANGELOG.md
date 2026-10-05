@@ -5,8 +5,8 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased] - 2026-10-05
 
 ### Added
-- The config audit chain's hashes are now **keyed** (`AuditChainKey`), so an
-  attacker with database write access can no longer rebuild the trail: with
+- The config audit chain's hashes are now **keyed** (`AuditChainKey`), so a
+  database writer without the active audit secret can no longer rebuild the trail: with
   `MOSIP_AUDIT_HMAC_SECRET` set, `entry_hash` becomes
   **HMAC-SHA-256** over the same canonical form instead of plain SHA-256, and
   the secret lives in the app server's environment rather than in the database.
@@ -31,10 +31,20 @@ All notable changes to this project will be documented in this file.
     reading `intact: true` can see whether that verdict came from a keyed chain
     (`hmac: true`) or a tamper-detecting one (`hmac: false`).
   - **Verification uses the same key as writing, and never falls back to
-    accepting.** A rotated or missing secret reports every entry as broken at
-    index 0 rather than quietly downgrading to a check the attacker can pass —
-    verified by a test that rotates the secret and asserts the break, with the
-    untouched rows still verifying under the original key.
+    accepting.** A different or missing secret reports every entry as broken
+    at index 0 rather than quietly downgrading to a weaker check — unless the
+    previous key is explicitly configured for a keyed rotation. A test pins the
+    hard break with no overlap, with untouched rows still verifying under the
+    original key.
+- Keyed chains can verify historical rows with
+  `MOSIP_AUDIT_HMAC_PREVIOUS_SECRET` while new application writes use the
+  current `MOSIP_AUDIT_HMAC_SECRET`. `/api/v1/config/audit/verify` reports
+  `rotationWindowOpen` (previous key configured) and `retiredKeyHashes`
+  (historical entries still need it); the console shows intact, broken, and
+  open-window states. The JPA round-trip test proves old and new hashes verify
+  after reload. **Limit:** audit rows are immutable, so the app cannot re-key
+  history; keep the previous key while any hashes need it. A trusted archival
+  or re-key protocol is required to retire it.
 - Every `CONFIG_CHANGED` audit entry now carries a **risk classification**
   (`details.risk`: `HIGH` or `LOW`, plus the named weakening moves).
   An edit that lowers `passiveThreshold` or switches `livenessEnabled`
@@ -145,24 +155,17 @@ All notable changes to this project will be documented in this file.
   enum stored as a number would stay green in CI and break in production, which
   is PostgreSQL, the one database never exercised. The test boots the real
   application against a real PostgreSQL with the **production** datasource
-  configuration (the same `POSTGRES_*` variables `application.yml` already
-  reads, not test-only properties), lets Flyway build the schema, and has
+  configuration, lets Flyway build the schema, and has
   Hibernate `validate` compare it against the entities, then round-trips a row
   to prove the mapping — including `OffsetDateTime` against `TIMESTAMPTZ`, the
   classic H2-passes/Postgres-fails difference.
   Two guards keep it honest: it asserts the JDBC product really is PostgreSQL
-  and that `ddl-auto` really is `validate`, so it cannot silently pass on H2
-  (verified: forcing it onto the dev profile fails all three with *"expected
-  PostgreSQL but connected to H2"*, *"expected `<validate>` but was
-  `<create-drop>`"* and a missing `flyway_schema_history`). Gated behind
-  `MOSIP_PG_TEST=true` so a plain `./mvnw test` still needs no services, and
-  excluded from the unit job's surefire filter so it runs only where a database
-  exists. Uses a CI **service container** rather than Testcontainers — the
-  PostgreSQL JDBC driver and `flyway-database-postgresql` are already
-  dependencies, so this adds no new test libraries.
-  *Not verified locally:* the sandbox's Docker cannot pull `postgres:16`
-  (registry credential/GPG failure), so only the skip path and the guard
-  behaviour were exercised here. The first real run will be CI's.
+  and that `ddl-auto` really is `validate`, so it cannot silently pass on H2.
+  Testcontainers starts an isolated PostgreSQL 16 locally and in CI; the schema
+  suite is excluded from the H2 unit job and runs in its dedicated CI job. A
+  local run passed all four schema checks. Testcontainers 1.21.4 is pinned
+  because the Spring Boot 3.3.3 managed 1.19 client requests Docker API 1.32,
+  which recent Docker daemons reject.
 - Micrometer timers around every phase of the per-frame decision path
   (`decode`, `facedetect`, `onnxscore`, `heuristicscore`, `padheuristic`,
   `paddonx`, plus a wall-clock `total`), surfaced as a `pipelineTimings` block

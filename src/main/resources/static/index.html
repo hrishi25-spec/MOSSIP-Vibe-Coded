@@ -14,6 +14,7 @@
   <h1>MOSIP Face Liveness &amp; PAD — Test Console</h1>
   <span class="pill" id="pill-health">checking…</span>
   <span class="pill" id="pill-engine">engine…</span>
+  <span class="pill" id="pill-chain">chain…</span>
   <span class="spacer"></span>
   <span class="pill" id="pill-session">no session</span>
 </header>
@@ -174,6 +175,21 @@
           marked <code>[risk: HIGH]</code>, with the reason. The history
           loads with the page, so the most recent edit is visible without
           clicking refresh.</p>
+      </div>
+    </section>
+
+    <section class="mt16">
+      <h2>Chain integrity</h2>
+      <div class="body">
+        <pre id="chain-details">Checking chain…</pre>
+        <div class="row mt12">
+          <button id="btn-chain-refresh">Refresh</button>
+        </div>
+        <p class="hint">The config audit trail is tamper-evident — each entry is hashed over its predecessor
+          (<code>prev_hash → entry_hash</code>). The endpoint verifies the whole chain, so a break beyond the
+          visible audit-feed page is still detected. The header badge is green when every link checks out,
+          amber while a previous key is configured for verification, and red on a tamper or a missing row.
+          The details show whether any historical entries still need the previous key.</p>
       </div>
     </section>
   </div>

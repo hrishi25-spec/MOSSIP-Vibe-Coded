@@ -158,28 +158,63 @@ public final class AuditChain {
      * so the walk starts at the first hashed entry.</p>
      *
      * @param ordered entries oldest first; must be the full chain, not a page
-     * @param key the same secret the entries were written with
+     * @param key the secret the entries were written with, plus the previous
+     *        one while historical hashes still need it
      * @return the first break, or empty when every link checks out
      */
     public static Optional<Break> verify(List<AuditLog> ordered, AuditChainKey key) {
+        return verifyChain(ordered, key).breakInfo();
+    }
+
+    /**
+     * Walks the chain and also reports whether any entry verified only under
+     * the previous secret.
+     *
+     * <p>That second fact tells an operator whether any historical row still
+     * needs the previous secret. The chain can be intact while still needing
+     * that key; the immutable rows cannot be re-keyed in place.</p>
+     */
+    public static Verification verifyChain(List<AuditLog> ordered, AuditChainKey key) {
         String expectedPrev = GENESIS;
         int index = 0;
+        boolean retiredUsed = false;
+        Break firstBreak = null;
         for (AuditLog entry : ordered) {
             if (entry.getEntryHash() == null) {
                 continue;               // legacy row, predates the chain
             }
-            String recomputed = hashOf(entry, key);
-            boolean selfConsistent = recomputed.equals(entry.getEntryHash());
+            // The previous secret preserves verification of historical rows;
+            // see AuditChainKey for the retention limit.
+            AuditChainKey.Match match = key.match(canonical(entry), entry.getEntryHash());
+            if (match == AuditChainKey.Match.RETIRED) {
+                retiredUsed = true;
+            }
+            boolean selfConsistent = match != AuditChainKey.Match.NONE;
             boolean linked = expectedPrev.equals(entry.getPrevHash());
-            if (!selfConsistent || !linked) {
-                return Optional.of(new Break(index, entry.getId(),
-                        selfConsistent ? null : recomputed, entry.getEntryHash(),
-                        entry.getPrevHash(), expectedPrev));
+            if (firstBreak == null && (!selfConsistent || !linked)) {
+                firstBreak = new Break(index, entry.getId(),
+                        selfConsistent ? null : hashOf(entry, key), entry.getEntryHash(),
+                        entry.getPrevHash(), expectedPrev);
             }
             expectedPrev = entry.getEntryHash();
             index++;
         }
-        return Optional.empty();
+        return new Verification(Optional.ofNullable(firstBreak), retiredUsed);
+    }
+
+    /**
+     * The outcome of a walk: where it stopped, if anywhere, and whether the
+     * previous secret was needed to get there.
+     *
+     * @param breakInfo the first break, or empty when every link checks out
+     * @param retiredKeyHashes {@code true} when at least one entry reproduced
+     *        only under the previous secret
+     */
+    public record Verification(Optional<Break> breakInfo, boolean retiredKeyHashes) {
+
+        public boolean intact() {
+            return breakInfo.isEmpty();
+        }
     }
 
     /**

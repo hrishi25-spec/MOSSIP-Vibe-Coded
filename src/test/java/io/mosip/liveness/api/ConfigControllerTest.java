@@ -417,6 +417,8 @@ class ConfigControllerTest {
         mockMvc.perform(get("/api/v1/config/audit/verify"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.intact").value(true))
+                .andExpect(jsonPath("$.rotationWindowOpen").value(false))
+                .andExpect(jsonPath("$.retiredKeyHashes").value(false))
                 // The mode is reported so a fallback chain cannot be mistaken
                 // for a keyed one: "intact" alone would overclaim.
                 .andExpect(jsonPath("$.hmac").value(false))

@@ -89,6 +89,51 @@ class AuditChainKeyTest {
     }
 
     @Test
+    @DisplayName("a retired secret is accepted only alongside a current one")
+    void retiredSecretNeedsACurrentOne() {
+        // Accepting a retired secret with nothing to rotate onto would leave the
+        // chain keyed by a secret the configuration does not name.
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> new AuditChainKey("", SECRET));
+        assertTrue(e.getMessage().contains("previous-secret"), e.getMessage());
+    }
+
+    @Test
+    @DisplayName("the retired secret must actually differ")
+    void retiredSecretMustDifferFromTheCurrentOne() {
+        // The rotation step where the new value is pasted into both fields: a
+        // window that looks like a rotation and widens nothing.
+        assertThrows(IllegalArgumentException.class,
+                () -> new AuditChainKey(SECRET, SECRET));
+        assertTrue(new AuditChainKey(SECRET, "a-different-audit-secret-9876543210")
+                .isRotating());
+        assertFalse(new AuditChainKey(SECRET).isRotating());
+    }
+
+    @Test
+    @DisplayName("a retired secret is held to the same minimum length")
+    void retiredSecretCannotBeShort() {
+        assertThrows(IllegalArgumentException.class,
+                () -> new AuditChainKey(SECRET, "short"));
+    }
+
+    @Test
+    @DisplayName("verification accepts either secret, writing uses only the current one")
+    void matchingCoversTheWindowWithoutWideningWrites() {
+        AuditChainKey rotating = new AuditChainKey(SECRET, "a-different-audit-secret-9876543210");
+        AuditChainKey oldKey = new AuditChainKey("a-different-audit-secret-9876543210");
+        String canonical = "an entry written before the rotation";
+
+        assertEquals(AuditChainKey.Match.RETIRED, rotating.match(canonical, oldKey.hash(canonical)),
+                "the window is exactly this: the old hash still verifies");
+        assertEquals(AuditChainKey.Match.CURRENT, rotating.match(canonical, rotating.hash(canonical)));
+        assertEquals(AuditChainKey.Match.NONE, rotating.match(canonical, "f".repeat(64)));
+        assertEquals(AuditChainKey.Match.NONE, rotating.match(canonical, null));
+        assertNotEquals(oldKey.hash(canonical), rotating.hash(canonical),
+                "the configured application writer must use the current secret");
+    }
+
+    @Test
     @DisplayName("exactly the minimum length is accepted, one shorter is not")
     void minimumLengthSecretIsAccepted() {
         assertTrue(new AuditChainKey("a".repeat(AuditChainKey.MIN_SECRET_LENGTH)).isKeyed());

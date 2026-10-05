@@ -120,15 +120,16 @@ public class TestConfig {
     }
 
     /**
-     * The chain key ConfigController hashes with, bound from the same property
-     * production uses — the slices run with it unset, which is the documented
+     * The chain key ConfigController hashes with, bound from the same properties
+     * production uses — the slices run with them unset, which is the documented
      * SHA-256 fallback, so {@code /audit/verify} reports {@code hmac: false}.
-     * A bean method is not a Spring-managed constructor, so the {@code @Value}
-     * is injected here by hand; AuditChainKeyTest covers both modes.
+     * A bean method is not a Spring-managed constructor, so both {@code @Value}
+     * injections happen here by hand; AuditChainKeyTest covers the key behavior.
      */
     @Bean @Primary
     public AuditChainKey auditChainKey(
-            @Value("${mosip.security.audit-hmac-secret:}") String secret) {
-        return new AuditChainKey(secret);
+            @Value("${mosip.security.audit-hmac-secret:}") String secret,
+            @Value("${mosip.security.audit-hmac-previous-secret:}") String previousSecret) {
+        return new AuditChainKey(secret, previousSecret);
     }
 }

@@ -34,6 +34,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
       # Admin key required by PUT /api/v1/config/* — set it in .env.
       MOSIP_ADMIN_API_KEY: ${MOSIP_ADMIN_API_KEY:-}
+      # HMAC key for the config audit chain; optional, but recommended.
+      MOSIP_AUDIT_HMAC_SECRET: ${MOSIP_AUDIT_HMAC_SECRET:-}
+      # Keep the old key available while immutable history still needs it.
+      MOSIP_AUDIT_HMAC_PREVIOUS_SECRET: ${MOSIP_AUDIT_HMAC_PREVIOUS_SECRET:-}
       # Challenge-window floor in ms (default 15000, hard minimum 1000).
       MIN_CHALLENGE_WINDOW_MS: ${MIN_CHALLENGE_WINDOW_MS:-15000}
       # Peers whose forwarded client IP may be believed for rate limiting, e.g.

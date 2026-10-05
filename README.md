@@ -383,13 +383,19 @@ Hardening built into the service (no extra dependencies):
   database, so a rebuilt chain fails verification instead of verifying
   perfectly. Left unset, the hash falls back to plain SHA-256 — tamper-detecting
   only — and `/audit/verify` reports `"hmac": false` so the weaker mode is
-  visible rather than assumed. Keep the secret **stable**: verification uses the
-  same key as writing, so a rotated or missing secret reports every entry as
-  broken (fail loudly, never accept the downgrade).
+  visible rather than assumed. Keep the secret **stable**: without an explicitly
+  configured previous key, a rotated or missing secret reports old entries as
+  broken (fail loudly, never accept the downgrade). During a keyed rotation,
+  `MOSIP_AUDIT_HMAC_PREVIOUS_SECRET` lets verification accept old hashes while
+  new writes use the current key; `/audit/verify` and the console badge report
+  whether that key is configured and whether history still needs it. Rows are
+  immutable, so the previous key cannot be retired until history is archived or
+  re-keyed by a trusted process (not provided here); see `docs/configuration.md`.
   ```bash
   curl -s localhost:8000/api/v1/config/audit/verify
   # {"eventType":"CONFIG_CHANGED","chainedEntries":5,"headHash":"…",
-  #  "hmac":true,"intact":true}
+  #  "hmac":true,"rotationWindowOpen":false,"retiredKeyHashes":false,
+  #  "intact":true}
   ```
 - **Security headers on every response** (`SecurityHeadersFilter`):
   `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
@@ -440,7 +446,8 @@ Set a strong key before exposing the service:
 ```bash
 export MOSIP_ADMIN_API_KEY=$(openssl rand -hex 32)
 # keys the audit chain's hashes so a database-write attacker cannot rebuild it;
-# keep it stable across restarts — changing it invalidates the stored hashes
+# keep it stable across restarts. For keyed rotations, see docs/configuration.md
+# — immutable history may still require the previous key for verification.
 export MOSIP_AUDIT_HMAC_SECRET=$(openssl rand -hex 32)
 ```
 

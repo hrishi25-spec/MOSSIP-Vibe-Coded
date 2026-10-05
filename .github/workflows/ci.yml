@@ -295,40 +295,14 @@ jobs:
   # Green CI, broken production — while production is PostgreSQL, the one
   # database never exercised.
   #
-  # A service container rather than Testcontainers: the PostgreSQL JDBC driver
-  # and flyway-database-postgresql are already dependencies, so this adds no new
-  # test libraries. It runs in parallel with the suites rather than after them —
-  # it is an independent concern and gives a fast signal.
+  # The test owns an isolated PostgreSQL through Testcontainers, so the same
+  # schema gate runs locally and in CI without environment-specific setup.
+  # It runs in parallel with the suites rather than after them — it is an
+  # independent concern and gives a fast signal.
   schema:
     name: PostgreSQL schema gate
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: mosip
-          POSTGRES_PASSWORD: change_me
-          POSTGRES_DB: pad_liveness
-        ports:
-          - 5432:5432
-        # Fail fast if Postgres never comes up, instead of timing out the job
-        # on a connection that was never going to work.
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      # Opt-in switch read by @EnabledIfEnvironmentVariable, plus the same
-      # POSTGRES_* variables application.yml already reads — the test uses the
-      # production datasource configuration, not a test-only one.
-      MOSIP_PG_TEST: 'true'
-      POSTGRES_HOST: localhost
-      POSTGRES_PORT: '5432'
-      POSTGRES_USER: mosip
-      POSTGRES_PASSWORD: change_me
-      POSTGRES_DB: pad_liveness
     steps:
       - name: Checkout
         uses: actions/checkout@v4
