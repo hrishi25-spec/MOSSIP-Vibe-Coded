@@ -653,6 +653,63 @@ class LivenessPipelineIntegrationTest extends RawHttpSupport {
         }
     }
 
+    // ------------------------------------------------------------------ 8c. cross-origin write without the key
+
+    @Test
+    void crossOriginPutWithoutAdminKey_isRefusedAndCredentialsNeverEchoed() throws Exception {
+        String devServerOrigin = "http://localhost:5173";  // allowed by pattern, not this server
+
+        // Stage a known policy so "unchanged" is a real assertion.
+        HttpHeaders save = browserHeaders(devServerOrigin);
+        save.add(ADMIN_HEADER, ADMIN_KEY);
+        RawResponse saved = send(HttpMethod.PUT, RESIDENT_CONFIG,
+                "{\"challengeTimeoutMs\":26000}", save);
+        assertEquals(200, saved.status(), saved.body());
+
+        // The attacker's position is worse than "wrong origin": a page
+        // on an origin the CORS processor *allows* still cannot write.
+        // The origin allow-list is routing policy for the console, not
+        // authorization — the admin key is. The keyless preflight even
+        // succeeds, so a browser would let the attacker page *read* the
+        // refusal; only the key check stands between it and the policy.
+        HttpHeaders attackerPreflight = browserHeaders(devServerOrigin);
+        attackerPreflight.set(HttpHeaders.ACCESS_CONTROL_REQUEST_METHOD, "PUT");
+        attackerPreflight.set(HttpHeaders.ACCESS_CONTROL_REQUEST_HEADERS, "content-type");
+        RawResponse attackerOptions = send(HttpMethod.OPTIONS, RESIDENT_CONFIG, null, attackerPreflight);
+        assertEquals(200, attackerOptions.status(),
+                "a keyless preflight is allowed — CORS itself is not the barrier");
+
+        RawResponse attacker = send(HttpMethod.PUT, RESIDENT_CONFIG,
+                "{\"challengeTimeoutMs\":30000,\"passiveThreshold\":0.5}",
+                browserHeaders(devServerOrigin));
+        assertEquals(403, attacker.status(), attacker.body());
+        assertEquals("FORBIDDEN", mapper.readTree(attacker.body()).get("error").asText());
+        JsonNode after = expect(HttpStatus.OK,
+                exchange(HttpMethod.GET, "/api/v1/config/RESIDENT", null, false));
+        assertEquals(26000, after.get("challengeTimeoutMs").asInt(),
+                "a keyless cross-origin PUT must not change the policy");
+
+        // Credentials are never echoed. The console authenticates with
+        // the X-Admin-API-Key header and the app sets no cookies, so
+        // credentialed CORS must stay off on every response — preflight,
+        // success and refusal alike — and the allow-origin header must
+        // stay the specific requesting origin rather than a wildcard
+        // (the wildcard is only safe *because* credentials are off;
+        // pinning both keeps them from drifting apart).
+        assertNull(attackerOptions.header(HttpHeaders.ACCESS_CONTROL_ALLOW_CREDENTIALS),
+                "a preflight must never advertise credentialed CORS");
+        assertNull(saved.header(HttpHeaders.ACCESS_CONTROL_ALLOW_CREDENTIALS),
+                "an accepted cross-origin call must never advertise credentialed CORS");
+        assertNull(attacker.header(HttpHeaders.ACCESS_CONTROL_ALLOW_CREDENTIALS),
+                "a refused cross-origin call must never advertise credentialed CORS");
+        assertEquals(devServerOrigin, attackerOptions.header(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN),
+                "the allowed origin must be echoed specifically, never as a wildcard");
+        assertEquals(devServerOrigin, attacker.header(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN),
+                "a refusal must still name the allowed origin specifically");
+        assertNull(saved.header("Set-Cookie"), "no cookie is ever set, so none may leak cross-origin");
+        assertNull(attacker.header("Set-Cookie"), "no cookie is ever set, so none may leak cross-origin");
+    }
+
     // ------------------------------------------------------------------ 9. published rate-limit budget
 
     @Test
