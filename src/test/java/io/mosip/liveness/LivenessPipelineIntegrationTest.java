@@ -13,7 +13,6 @@ import org.junit.jupiter.api.Timeout;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
-import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -76,6 +75,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @ActiveProfiles("dev")
 @TestPropertySource(properties = {
         "mosip.security.admin-api-key=" + LivenessPipelineIntegrationTest.ADMIN_KEY,
+        // Keys the audit chain, the way MOSIP_AUDIT_HMAC_SECRET would in a
+        // deployment: set here so the real boot path runs keyed rather than in
+        // the fallback, and the verify endpoint can be seen reporting the mode.
+        "mosip.security.audit-hmac-secret=" + LivenessPipelineIntegrationTest.AUDIT_SECRET,
         // Shortened only so the timeout path is exercised over real HTTP in
         // seconds rather than 2 × 15s of wall clock. Production keeps the 15s
         // default — DecisionEngineServiceTest pins the default and the 1s clamp.
@@ -113,6 +116,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class LivenessPipelineIntegrationTest extends RawHttpSupport {
 
     static final String ADMIN_KEY = "e2e-admin-key";
+    /** Long enough to satisfy the key's minimum; the value itself is irrelevant. */
+    static final String AUDIT_SECRET = "integration-test-audit-hmac-secret";
     /** Same header name as ConfigController.ADMIN_API_KEY_HEADER (package-private there). */
     static final String ADMIN_HEADER = "X-Admin-API-Key";
 
@@ -140,7 +145,6 @@ class LivenessPipelineIntegrationTest extends RawHttpSupport {
     private static String frameB64;
     private static String attackB64;
 
-    @LocalServerPort private int port;
     @Autowired private TestRestTemplate rest;
     @Autowired private ObjectMapper mapper;
 
@@ -533,6 +537,31 @@ class LivenessPipelineIntegrationTest extends RawHttpSupport {
             assertNotEquals("CONFIG_CHANGED", e.path("eventType").asText(),
                     "config events must not leak into a session trail: " + sessionAudit);
         }
+    }
+
+    // ------------------------------------------------------------------ 7b. the chain verifies end to end
+
+    @Test
+    void configAuditChain_verifiesKeyedEndToEnd() throws Exception {
+        // One real edit, so there is a chain to walk — written by the real app
+        // with the secret configured, the way a deployment that sets
+        // MOSIP_AUDIT_HMAC_SECRET runs.
+        expect(HttpStatus.OK, exchange(HttpMethod.PUT, RESIDENT_CONFIG,
+                "{\"challengeTimeoutMs\":31000}", true));
+
+        JsonNode verified = expect(HttpStatus.OK,
+                exchange(HttpMethod.GET, "/api/v1/config/audit/verify", null, false));
+        assertEquals("CONFIG_CHANGED", verified.get("eventType").asText());
+        assertTrue(verified.get("chainedEntries").asInt() >= 1,
+                "at least the entry just written: " + verified);
+        assertNotNull(verified.get("headHash").asText());
+        // The mode rides on the result: "intact" alone does not say whether a
+        // database writer could have rebuilt the trail, and a fallback chain
+        // would otherwise read exactly like a keyed one.
+        assertTrue(verified.get("hmac").asBoolean(),
+                "the secret is configured, so the keyed mode must be reported: " + verified);
+        assertTrue(verified.get("intact").asBoolean(),
+                "a chain this app wrote with this secret must verify: " + verified);
     }
 
     // ------------------------------------------------------------------ 8. browser-style config PUT

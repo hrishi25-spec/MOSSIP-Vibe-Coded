@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased] - 2026-10-05
 
 ### Added
+- The config audit chain's hashes are now **keyed** (`AuditChainKey`), so an
+  attacker with database write access can no longer rebuild the trail: with
+  `MOSIP_AUDIT_HMAC_SECRET` set, `entry_hash` becomes
+  **HMAC-SHA-256** over the same canonical form instead of plain SHA-256, and
+  the secret lives in the app server's environment rather than in the database.
+  The canonical form is untouched, so this is a construction change, not a
+  format change — which is what keeps the two modes comparable.
+  Previously the chain stopped at the honest ceiling: anyone holding a database
+  connection could read the stored hashes and recompute every link, producing a
+  chain that verified perfectly on its own. `AuditChainTamperTest` now stages
+  exactly that attack — edit a row, then recompute the entire trail publicly —
+  and pins that it verifies under the fallback key yet breaks at the **first
+  entry** under the real secret. Verified by mutation: ignoring the secret
+  outright fails that test.
+  Three decisions, each visible rather than silent:
+  - **A secret under 16 characters fails at startup.** A guessable key
+    produces keyed-looking hashes an attacker recomputes just as easily, so
+    failing fast beats shipping a false sense of security. The exception names
+    the setting to fix.
+  - **No secret falls back to the original SHA-256**, so a fresh deployment
+    boots with no configuration and chains written before the key existed stay
+    verifiable. The fallback is *reported*, not implied:
+    `GET /api/v1/config/audit/verify` gained an `hmac` field, so an operator
+    reading `intact: true` can see whether that verdict came from a keyed chain
+    (`hmac: true`) or a tamper-detecting one (`hmac: false`).
+  - **Verification uses the same key as writing, and never falls back to
+    accepting.** A rotated or missing secret reports every entry as broken at
+    index 0 rather than quietly downgrading to a check the attacker can pass —
+    verified by a test that rotates the secret and asserts the break, with the
+    untouched rows still verifying under the original key.
 - Every `CONFIG_CHANGED` audit entry now carries a **risk classification**
   (`details.risk`: `HIGH` or `LOW`, plus the named weakening moves).
   An edit that lowers `passiveThreshold` or switches `livenessEnabled`
@@ -58,7 +88,8 @@ All notable changes to this project will be documented in this file.
   with database write access, who can read the stored hashes and recompute the
   chain. Closing that means keying the hash with a secret the database does not
   hold (HMAC, secret from the environment) or anchoring the chain head where a
-  database writer cannot reach. Neither is done here.
+  database writer cannot reach. The hash is now **keyed** when
+  `MOSIP_AUDIT_HMAC_SECRET` is set — see the entry below.
 - `audit_logs` gained a `workflow_type` column (`V8__audit_logs_workflow_type.sql`),
   so `GET /api/v1/config/audit` can be filtered **in the database** with
   `?workflowType=`. The audit table grows one row per frame decision, so

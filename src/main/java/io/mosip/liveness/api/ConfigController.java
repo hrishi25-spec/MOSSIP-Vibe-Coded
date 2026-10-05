@@ -5,6 +5,7 @@ import io.mosip.liveness.config.EffectivePolicyValidator;
 import io.mosip.liveness.config.LivenessConfig;
 import io.mosip.liveness.config.WorkflowPolicyDefaults;
 import io.mosip.liveness.audit.AuditChain;
+import io.mosip.liveness.audit.AuditChainKey;
 import io.mosip.liveness.audit.AuditEventType;
 import io.mosip.liveness.dto.AuditLogEntry;
 import io.mosip.liveness.dto.ConfigPolicyResponse;
@@ -53,6 +54,8 @@ public class ConfigController {
     private final AuditLogRepository auditLogRepo;
     private final ConfigService configService;
     private final EffectivePolicyValidator effectivePolicyValidator;
+    /** Keys the audit chain; see {@link AuditChainKey}. */
+    private final AuditChainKey auditChainKey;
 
     /**
      * Admin key required to mutate policy — fail-closed: when the key is not
@@ -310,7 +313,7 @@ public class ConfigController {
                 now = head.getCreatedAt().plusNanos(1_000_000L);   // +1 ms
             }
             entry.setCreatedAt(now);
-            entry.setEntryHash(AuditChain.hashOf(entry));
+            entry.setEntryHash(AuditChain.hashOf(entry, auditChainKey));
         }
         return entry;
     }
@@ -334,7 +337,12 @@ public class ConfigController {
         result.put("eventType", AuditEventType.CONFIG_CHANGED.name());
         result.put("chainedEntries", chain.size());
         result.put("headHash", chain.isEmpty() ? null : chain.get(chain.size() - 1).getEntryHash());
-        Optional<AuditChain.Break> broken = AuditChain.verify(chain);
+        // The mode the walk below actually used. Without it, a chain verified
+        // against the SHA-256 fallback reads exactly like a keyed one, and an
+        // operator would take "intact" as stronger than it is: it only says a
+        // database writer cannot rebuild this trail.
+        result.put("hmac", auditChainKey.isKeyed());
+        Optional<AuditChain.Break> broken = AuditChain.verify(chain, auditChainKey);
         result.put("intact", broken.isEmpty());
         broken.ifPresent(b -> {
             result.put("breakIndex", b.index());

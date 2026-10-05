@@ -2,12 +2,8 @@ package io.mosip.liveness.audit;
 
 import io.mosip.liveness.models.entity.AuditLog;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.Collection;
 import java.util.Comparator;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -49,15 +45,23 @@ import java.util.Optional;
  *
  * <h2>What this does and does not buy</h2>
  *
- * <p>ponytail: this detects corruption, accidental edits and deletion by anyone
+ * <p>This detects corruption, accidental edits and deletion by anyone
  * who does not recompute the chain — including the admin-key holder editing
- * through the application, which is the realistic threat here. It does <b>not</b>
- * stop an attacker with write access to the database, who can read the stored
- * hashes and rebuild the whole chain. Making it tamper-proof against that
- * attacker means keying the hash with a secret the database does not hold
- * (HMAC, secret from the environment) or anchoring the chain head somewhere the
- * database writer cannot reach. Neither is done here; upgrade path is an
- * {@code HMAC} over the same canonical string.</p>
+ * through the application, which is the realistic threat here. An attacker with
+ * write access to the database could read the stored hashes and rebuild the
+ * chain, so the hash is <em>keyed</em> by {@link AuditChainKey} with a secret
+ * the database does not hold: without it, a rebuilt chain fails verification
+ * outright instead of verifying perfectly on its own.</p>
+ *
+ * <p>With no secret configured the hash falls back to plain
+ * {@code SHA-256} of the same canonical string — tamper-detecting, but not
+ * tamper-proofing against a database writer, and reported as such by
+ * {@code GET /api/v1/config/audit/verify} ({@code hmac: false}). The
+ * canonical form is unchanged, which is what makes the two modes comparable:
+ * a chain written before the secret was configured still verifies once it is
+ * set, as long as every entry was written in the same mode as the one being
+ * verified. Writing keyed and verifying unkeyed (a missing or rotated secret)
+ * is reported as a break at the first entry, never accepted as a downgrade.</p>
  */
 public final class AuditChain {
 
@@ -96,8 +100,13 @@ public final class AuditChain {
         return sb.toString();
     }
 
-    public static String hashOf(AuditLog entry) {
-        return sha256(canonical(entry));
+    /**
+     * The entry's {@code entry_hash}, keyed by the supplied secret: HMAC when
+     * {@link AuditChainKey#isKeyed()}, plain SHA-256 in fallback mode. Writing
+     * and verification must use the same key — see {@link AuditChainKey}.
+     */
+    public static String hashOf(AuditLog entry, AuditChainKey key) {
+        return key.hash(canonical(entry));
     }
 
     private static void field(StringBuilder sb, String value) {
@@ -140,15 +149,6 @@ public final class AuditChain {
         }
     }
 
-    private static String sha256(String input) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            return HexFormat.of().formatHex(digest.digest(input.getBytes(StandardCharsets.UTF_8)));
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 is required by the JLS but unavailable", e);
-        }
-    }
-
     /**
      * Walks a chain in order and reports the first entry that does not follow
      * from its predecessor.
@@ -158,16 +158,17 @@ public final class AuditChain {
      * so the walk starts at the first hashed entry.</p>
      *
      * @param ordered entries oldest first; must be the full chain, not a page
+     * @param key the same secret the entries were written with
      * @return the first break, or empty when every link checks out
      */
-    public static Optional<Break> verify(List<AuditLog> ordered) {
+    public static Optional<Break> verify(List<AuditLog> ordered, AuditChainKey key) {
         String expectedPrev = GENESIS;
         int index = 0;
         for (AuditLog entry : ordered) {
             if (entry.getEntryHash() == null) {
                 continue;               // legacy row, predates the chain
             }
-            String recomputed = hashOf(entry);
+            String recomputed = hashOf(entry, key);
             boolean selfConsistent = recomputed.equals(entry.getEntryHash());
             boolean linked = expectedPrev.equals(entry.getPrevHash());
             if (!selfConsistent || !linked) {

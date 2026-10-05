@@ -1,6 +1,7 @@
 package io.mosip.liveness.api;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.mosip.liveness.audit.AuditChainKey;
 import io.mosip.liveness.audit.AuditEventType;
 import io.mosip.liveness.dto.ConfigPolicyUpdate;
 import io.mosip.liveness.models.entity.AuditLog;
@@ -50,6 +51,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class ConfigControllerTest {
 
     static final String ADMIN_KEY = "test-admin-key";
+
+    /**
+     * The key the controller hashes with: this slice leaves the secret unset,
+     * which is the documented SHA-256 fallback (TestConfig binds the same
+     * property the controller sees). AuditChainTamperTest covers the keyed mode.
+     */
+    private static final AuditChainKey CHAIN_KEY = new AuditChainKey("");
 
 
     @Autowired private MockMvc mockMvc;
@@ -391,7 +399,7 @@ class ConfigControllerTest {
                 .createdAt(OffsetDateTime.parse("2026-10-04T09:00:00Z"))
                 .prevHash(AuditChain.GENESIS)
                 .build();
-        first.setEntryHash(AuditChain.hashOf(first));
+        first.setEntryHash(AuditChain.hashOf(first, CHAIN_KEY));
 
         AuditLog second = AuditLog.builder()
                 .id(UUID.randomUUID())
@@ -401,7 +409,7 @@ class ConfigControllerTest {
                 .createdAt(OffsetDateTime.parse("2026-10-04T09:05:00Z"))
                 .prevHash(first.getEntryHash())
                 .build();
-        second.setEntryHash(AuditChain.hashOf(second));
+        second.setEntryHash(AuditChain.hashOf(second, CHAIN_KEY));
 
         when(auditLogRepo.findByEventTypeAndEntryHashIsNotNullOrderByCreatedAtAsc(
                 eq(AuditEventType.CONFIG_CHANGED.name()))).thenReturn(List.of(first, second));
@@ -409,6 +417,9 @@ class ConfigControllerTest {
         mockMvc.perform(get("/api/v1/config/audit/verify"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.intact").value(true))
+                // The mode is reported so a fallback chain cannot be mistaken
+                // for a keyed one: "intact" alone would overclaim.
+                .andExpect(jsonPath("$.hmac").value(false))
                 .andExpect(jsonPath("$.chainedEntries").value(2))
                 .andExpect(jsonPath("$.headHash").value(second.getEntryHash()));
 
@@ -453,7 +464,7 @@ class ConfigControllerTest {
         AuditLog entry = saved.getValue();
 
         assertEquals("a".repeat(64), entry.getPrevHash(), "must chain onto the existing head");
-        assertEquals(AuditChain.hashOf(entry), entry.getEntryHash(),
+        assertEquals(AuditChain.hashOf(entry, CHAIN_KEY), entry.getEntryHash(),
                 "the stored hash must match the canonical form of what was written");
         assertNotNull(entry.getCreatedAt(), "the hash covers createdAt, so it is set before hashing");
         assertTrue(entry.getCreatedAt().isAfter(head.getCreatedAt()),

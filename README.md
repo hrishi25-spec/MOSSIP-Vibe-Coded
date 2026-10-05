@@ -368,6 +368,29 @@ Hardening built into the service (no extra dependencies):
   # one workflow only — filtered in the database, not in the browser
   curl -s "localhost:8000/api/v1/config/audit?workflowType=OPERATOR"
   ```
+- **The audit trail is tamper-evident, and optionally tamper-proof** — each
+  `CONFIG_CHANGED` row is chained (`prev_hash` → `entry_hash`), and PostgreSQL
+  rejects `UPDATE` / `DELETE` on `audit_logs` with triggers, so an edited row
+  invalidates its own hash and a deleted one leaves every successor pointing at
+  a hash that no longer follows. `GET /api/v1/config/audit/verify` walks the
+  whole chain and reports the first break, distinguishing an **edited** row
+  from a **deleted** one.
+  An unkeyed hash only stops attackers who do not rebuild the chain — anyone
+  with database write access can read the stored hashes and recompute them. Set
+  `MOSIP_AUDIT_HMAC_SECRET` (≥ 16 characters; shorter values fail at startup,
+  since a guessable key is no key) to key the hash with **HMAC-SHA-256** over
+  the same canonical form: the secret lives on the app server, not in the
+  database, so a rebuilt chain fails verification instead of verifying
+  perfectly. Left unset, the hash falls back to plain SHA-256 — tamper-detecting
+  only — and `/audit/verify` reports `"hmac": false` so the weaker mode is
+  visible rather than assumed. Keep the secret **stable**: verification uses the
+  same key as writing, so a rotated or missing secret reports every entry as
+  broken (fail loudly, never accept the downgrade).
+  ```bash
+  curl -s localhost:8000/api/v1/config/audit/verify
+  # {"eventType":"CONFIG_CHANGED","chainedEntries":5,"headHash":"…",
+  #  "hmac":true,"intact":true}
+  ```
 - **Security headers on every response** (`SecurityHeadersFilter`):
   `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
   `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy`,
@@ -416,6 +439,9 @@ Set a strong key before exposing the service:
 
 ```bash
 export MOSIP_ADMIN_API_KEY=$(openssl rand -hex 32)
+# keys the audit chain's hashes so a database-write attacker cannot rebuild it;
+# keep it stable across restarts — changing it invalidates the stored hashes
+export MOSIP_AUDIT_HMAC_SECRET=$(openssl rand -hex 32)
 ```
 
 ## Notes on the spec's non-functional requirements

@@ -61,6 +61,50 @@ Every `CONFIG_CHANGED` row is chained (`prev_hash` → `entry_hash`), and
 PostgreSQL rejects `UPDATE` and `DELETE` on `audit_logs`. `/audit/verify`
 reports the first break and whether it was an edited row or a deleted one.
 
+### Keying the chain (`MOSIP_AUDIT_HMAC_SECRET`)
+
+The chain's hash is `H(prev_hash ‖ canonical(entry))` over a canonical form
+that is stable across a database round-trip. Unkeyed, that detects edits and
+deletions by anyone who does not recompute the chain — but an attacker with
+write access to the database can read the stored hashes and rebuild it, which
+verifies perfectly on its own.
+
+Set `MOSIP_AUDIT_HMAC_SECRET` (property `mosip.security.audit-hmac-secret`,
+minimum 16 characters — shorter values are **rejected at startup**, because a
+guessable key produces keyed-looking hashes an attacker recomputes just as
+easily) to key the hash with **HMAC-SHA-256** instead. The secret lives in the
+app server's environment, not in the database, so a database-write attacker
+cannot recompute a single link:
+
+```bash
+export MOSIP_AUDIT_HMAC_SECRET=$(openssl rand -hex 32)
+curl -s localhost:8000/api/v1/config/audit/verify
+# {"eventType":"CONFIG_CHANGED","chainedEntries":5,"headHash":"…","hmac":true,"intact":true}
+```
+
+| `hmac` | meaning |
+| ------ | ------- |
+| `true` | Entries are HMAC-keyed. A database writer who edits rows cannot rebuild the chain; verification reports the first entry whose stored hash the secret does not produce. |
+| `false` | **Documented fallback**: no secret configured, so the hash is plain SHA-256. Tamper-*detecting* only — a database writer can rebuild the trail. The mode is reported so this state is never mistaken for the keyed one. |
+
+Two operational consequences, both deliberate:
+
+- **Keep the secret stable.** Verification uses the same key as writing, so a
+  rotated or missing secret makes every stored hash unreproducible and
+  `/audit/verify` reports a break at the first entry with `contentChanged:
+  true`. That is the intended, loud behaviour — restoring the secret clears it.
+  Accepting the weaker key instead would let a downgrade pass unnoticed.
+- **The mode applies to the whole chain.** Chains written before the secret was
+  configured verify under the fallback; once it is set, every existing entry
+  reports as broken until the chain is rewritten under the new mode. The
+  canonical form is unchanged, so nothing needs migrating at the format level.
+
+The hash is computed **before** the INSERT: `id` is assigned by the database at
+persist time and `createdAt` by `@PrePersist`, and the immutability triggers
+reject the UPDATE that would write a corrected hash afterwards. `id` is
+therefore deliberately excluded from the canonical form — position in the chain
+plus `prev_hash` already binds an entry uniquely.
+
 ```json
 {
   "eventType": "CONFIG_CHANGED",

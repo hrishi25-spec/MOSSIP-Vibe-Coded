@@ -51,6 +51,15 @@ class AuditChainTamperTest {
 
     private static java.time.OffsetDateTime lastTimestamp = java.time.OffsetDateTime.now();
 
+    /**
+     * The key ConfigController hashes with when no secret is configured — the
+     * documented SHA-256 fallback, which is what most of these cases exercise.
+     */
+    private static final AuditChainKey UNKEYED = new AuditChainKey("");
+
+    /** A secret the database does not hold — production's configuration. */
+    private static final AuditChainKey KEYED = new AuditChainKey("e2e-audit-hmac-secret-0123456789");
+
     /** Strictly increasing, so ordering by created_at is unambiguous. */
     private static java.time.OffsetDateTime nextTimestamp() {
         lastTimestamp = lastTimestamp.plusNanos(1_000_000L);   // +1 ms
@@ -58,7 +67,7 @@ class AuditChainTamperTest {
     }
 
     /** Builds and persists one chained entry, the way ConfigController does. */
-    private AuditLog append(String previousHash, String threshold) {
+    private AuditLog append(AuditChainKey key, String previousHash, String threshold) {
         Map<String, Object> change = new LinkedHashMap<>();
         change.put("from", 0.80);
         change.put("to", Double.parseDouble(threshold));
@@ -74,14 +83,18 @@ class AuditChainTamperTest {
                 .prevHash(previousHash)
                 .createdAt(nextTimestamp())
                 .build();
-        entry.setEntryHash(AuditChain.hashOf(entry));
+        entry.setEntryHash(AuditChain.hashOf(entry, key));
         return repo.saveAndFlush(entry);
     }
 
     private String seedChain(int entries) {
+        return seedChain(UNKEYED, entries);
+    }
+
+    private String seedChain(AuditChainKey key, int entries) {
         String previous = AuditChain.GENESIS;
         for (int i = 0; i < entries; i++) {
-            previous = append(previous, "0." + (70 + i)).getEntryHash();
+            previous = append(key, previous, "0." + (70 + i)).getEntryHash();
         }
         return previous;
     }
@@ -96,7 +109,7 @@ class AuditChainTamperTest {
     void intactChainVerifies() {
         seedChain(4);
         assertEquals(4, chain().size());
-        assertTrue(AuditChain.verify(chain()).isEmpty(),
+        assertTrue(AuditChain.verify(chain(), UNKEYED).isEmpty(),
                 "a chain written normally must verify");
     }
 
@@ -116,10 +129,10 @@ class AuditChainTamperTest {
         List<AuditLog> reloaded = chain();
         assertEquals(2, reloaded.size());
         for (AuditLog entry : reloaded) {
-            assertEquals(entry.getEntryHash(), AuditChain.hashOf(entry),
+            assertEquals(entry.getEntryHash(), AuditChain.hashOf(entry, UNKEYED),
                     "entry " + entry.getId() + " must reproduce its own hash after a round-trip");
         }
-        assertTrue(AuditChain.verify(reloaded).isEmpty());
+        assertTrue(AuditChain.verify(reloaded, UNKEYED).isEmpty());
     }
 
     @Autowired
@@ -133,7 +146,7 @@ class AuditChainTamperTest {
     @DisplayName("an EDITED row is detected")
     void editedRowIsDetected() {
         seedChain(3);
-        assertTrue(AuditChain.verify(chain()).isEmpty());
+        assertTrue(AuditChain.verify(chain(), UNKEYED).isEmpty());
 
         // Exactly what an attacker covering their tracks does: rewrite the value
         // the audit says was set, keeping every other column intact.
@@ -143,7 +156,7 @@ class AuditChainTamperTest {
                 target.getId());
         entityManagerClear();
 
-        AuditChain.Break broken = AuditChain.verify(chain()).orElseThrow(
+        AuditChain.Break broken = AuditChain.verify(chain(), UNKEYED).orElseThrow(
                 () -> new AssertionError("an edited audit row must break the chain"));
 
         assertTrue(broken.contentChanged(),
@@ -167,7 +180,7 @@ class AuditChainTamperTest {
         List<AuditLog> remaining = chain();
         assertEquals(3, remaining.size(), "the row is really gone from the table");
 
-        AuditChain.Break broken = AuditChain.verify(remaining).orElseThrow(
+        AuditChain.Break broken = AuditChain.verify(remaining, UNKEYED).orElseThrow(
                 () -> new AssertionError("deleting an audit row must break the chain"));
 
         // The surviving rows are each internally consistent — their own content
@@ -191,7 +204,7 @@ class AuditChainTamperTest {
         jdbc.update("DELETE FROM audit_logs WHERE id = ?", middle.getId());
         entityManagerClear();
 
-        assertTrue(AuditChain.verify(chain()).isPresent());
+        assertTrue(AuditChain.verify(chain(), UNKEYED).isPresent());
 
         // Putting the row back with its old hash cannot fix anything: the
         // successor is chained to a hash that no longer exists, so the walk
@@ -207,7 +220,7 @@ class AuditChainTamperTest {
                 .build());
         entityManagerClear();
 
-        assertTrue(AuditChain.verify(chain()).isEmpty(),
+        assertTrue(AuditChain.verify(chain(), UNKEYED).isEmpty(),
                 "restoring the exact row repairs the chain — detection is of the gap, not a permanent mark");
     }
 
@@ -218,7 +231,80 @@ class AuditChainTamperTest {
         AuditLog first = chain().get(0);
         assertEquals(AuditChain.GENESIS, first.getPrevHash());
         assertEquals(head, first.getEntryHash());
-        assertTrue(AuditChain.verify(chain()).isEmpty());
+        assertTrue(AuditChain.verify(chain(), UNKEYED).isEmpty());
+    }
+
+    @Test
+    @DisplayName("a keyed chain verifies under the secret that wrote it")
+    void keyedChainVerifiesUnderItsSecret() {
+        seedChain(KEYED, 3);
+        assertTrue(AuditChain.verify(chain(), KEYED).isEmpty(),
+                "a chain written with a secret must verify with it");
+    }
+
+    @Test
+    @DisplayName("a database writer without the secret cannot rebuild the chain")
+    void databaseWriterWithoutTheSecretCannotRebuildTheChain() {
+        // A chain written with a real secret: the production configuration.
+        seedChain(KEYED, 4);
+
+        // The attacker's whole move: edit the value the audit says was set,
+        // then recompute every hash in the trail. Unkeyed, that is enough to
+        // make the chain verify perfectly — which is the whole reason the hash
+        // is keyed. They have a database connection and no secret, so every
+        // hash they can produce is the public SHA-256.
+        rebuildChainWithoutTheSecret(1);
+
+        // Under the fallback key the rebuilt chain is convincing...
+        assertTrue(AuditChain.verify(chain(), UNKEYED).isEmpty(),
+                "the unkeyed recomputation is internally consistent — that is the attack");
+
+        // ...and under the real secret it dies at the first entry, because the
+        // stored hash is not one the secret can produce.
+        AuditChain.Break broken = AuditChain.verify(chain(), KEYED).orElseThrow(
+                () -> new AssertionError("a rebuilt chain must not verify under the real secret"));
+        assertEquals(0, broken.index(),
+                "the first entry is already wrong: no stored hash here came from the secret");
+        assertTrue(broken.contentChanged(),
+                "the row's stored hash is not the keyed hash of its own content");
+    }
+
+    @Test
+    @DisplayName("a chain written under one secret does not verify under another")
+    void rotatedSecretIsDetectedRatherThanSilentlyAccepted() {
+        seedChain(KEYED, 2);
+
+        AuditChain.Break broken = AuditChain.verify(chain(),
+                new AuditChainKey("a-different-audit-secret-9876543210")).orElseThrow(
+                () -> new AssertionError("verification under the wrong secret must break"));
+        assertEquals(0, broken.index(), "the first entry fails its own hash");
+        assertTrue(broken.contentChanged(),
+                "self-inconsistent: no stored hash was produced by this secret");
+
+        assertTrue(AuditChain.verify(chain(), KEYED).isEmpty(),
+                "the same rows verify under the secret that wrote them");
+    }
+
+    /**
+     * Edits one row and recomputes every hash in the trail the only way an
+     * attacker without the secret can: publicly, over the whole chain.
+     */
+    private void rebuildChainWithoutTheSecret(int editedIndex) {
+        List<AuditLog> entries = chain();
+        jdbc.update("UPDATE audit_logs SET details = ? WHERE id = ?",
+                "{\"workflowType\":\"RESIDENT\",\"action\":\"UPDATED\",\"changes\":{\"passiveThreshold\":{\"from\":0.8,\"to\":0.01}}}",
+                entries.get(editedIndex).getId());
+        entityManagerClear();
+
+        String previous = AuditChain.GENESIS;
+        for (AuditLog entry : chain()) {
+            entry.setPrevHash(previous);
+            entry.setEntryHash(AuditChain.hashOf(entry, UNKEYED));
+            previous = entry.getEntryHash();
+            jdbc.update("UPDATE audit_logs SET prev_hash = ?, entry_hash = ? WHERE id = ?",
+                    entry.getPrevHash(), entry.getEntryHash(), entry.getId());
+        }
+        entityManagerClear();
     }
 
     @Test

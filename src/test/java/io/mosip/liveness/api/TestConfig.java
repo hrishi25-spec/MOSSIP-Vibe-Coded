@@ -1,5 +1,6 @@
 package io.mosip.liveness.api;
 
+import io.mosip.liveness.audit.AuditChainKey;
 import io.mosip.liveness.crud.AuditLogRepository;
 import io.mosip.liveness.crud.ChallengeRepository;
 import io.mosip.liveness.crud.ConfigPolicyRepository;
@@ -15,6 +16,7 @@ import io.mosip.liveness.services.LivenessEngineService;
 import io.mosip.liveness.services.PadEngineService;
 import io.mosip.liveness.services.ThresholdCalibrationService;
 import org.mockito.Mockito;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
@@ -115,5 +117,18 @@ public class TestConfig {
     @Bean @Primary
     public ClientIpResolver clientIpResolver() {
         return new ClientIpResolver();
+    }
+
+    /**
+     * The chain key ConfigController hashes with, bound from the same property
+     * production uses — the slices run with it unset, which is the documented
+     * SHA-256 fallback, so {@code /audit/verify} reports {@code hmac: false}.
+     * A bean method is not a Spring-managed constructor, so the {@code @Value}
+     * is injected here by hand; AuditChainKeyTest covers both modes.
+     */
+    @Bean @Primary
+    public AuditChainKey auditChainKey(
+            @Value("${mosip.security.audit-hmac-secret:}") String secret) {
+        return new AuditChainKey(secret);
     }
 }

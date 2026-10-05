@@ -70,6 +70,15 @@ mosip:
     # Admin key required by PUT /api/v1/config/* — fail-closed: when blank,
     # config updates are refused (see README, Security section).
     admin-api-key: ${MOSIP_ADMIN_API_KEY:}
+    # Secret that keys the audit chain's hashes (HMAC-SHA-256) so an attacker
+    # with database write access cannot recompute the chain — the secret lives
+    # on the app server, not in the database. Minimum 16 characters; startup
+    # fails on anything shorter. Blank falls back to plain SHA-256 over the
+    # same canonical form (tamper-detecting, not tamper-proof) and
+    # GET /api/v1/config/audit/verify reports hmac: false so the weaker mode
+    # is visible rather than assumed. Keep it stable: verification uses the
+    # same key as writing, so rotating it flags every entry as broken.
+    audit-hmac-secret: ${MOSIP_AUDIT_HMAC_SECRET:}
     # Reject POST/PUT requests whose Content-Length exceeds this (24 MB).
     max-request-body-bytes: ${MAX_REQUEST_BODY_BYTES:25165824}
     # Flood protection (RateLimitFilter): fixed windows, in-memory.
