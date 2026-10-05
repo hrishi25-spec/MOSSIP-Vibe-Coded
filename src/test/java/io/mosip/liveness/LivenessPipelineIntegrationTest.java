@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.mosip.liveness.app.config.AppConfig;
+import io.mosip.liveness.testing.RawHttpSupport;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -23,14 +24,9 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.web.client.HttpClientErrorException;
 
-import java.io.IOException;
 import java.io.InputStream;
-import java.net.URI;
-import java.net.http.HttpRequest;
 import java.util.Base64;
 import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
@@ -110,8 +106,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Genuine parallelism needs per-test policy isolation (a database each, or
  * workflow types per test), which is a bigger change than this suite justifies.
  * The rate-limit budgets are raised below so that coupling is at least gone.</p>
+ *
+ * <p>Extends {@link RawHttpSupport} for the browser-shaped raw HTTP
+ * calls (real {@code Origin} and preflight headers).</p>
  */
-class LivenessPipelineIntegrationTest {
+class LivenessPipelineIntegrationTest extends RawHttpSupport {
 
     static final String ADMIN_KEY = "e2e-admin-key";
     /** Same header name as ConfigController.ADMIN_API_KEY_HEADER (package-private there). */
@@ -731,42 +730,6 @@ class LivenessPipelineIntegrationTest {
 
     // ------------------------------------------------------------------ helpers
 
-    /**
-     * A browser-shaped request sent through the JDK HTTP client.
-     *
-     * <p>{@code TestRestTemplate} uses {@code HttpURLConnection}, which silently
-     * strips {@code Origin} and {@code Access-Control-Request-*} as restricted
-     * headers — with those gone a preflight is indistinguishable from a plain
-     * same-origin OPTIONS, so this test would pass without ever exercising CORS.
-     * The JDK client sends them verbatim.</p>
-     */
-    private RawResponse send(HttpMethod method, String path, String body, HttpHeaders headers) {
-        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(url(path)));
-        headers.forEach((name, values) -> values.forEach(v -> builder.header(name, v)));
-        builder.method(method.name(), body == null ? HttpRequest.BodyPublishers.noBody()
-                : HttpRequest.BodyPublishers.ofString(body));
-        try {
-            java.net.http.HttpResponse<String> res = java.net.http.HttpClient.newHttpClient()
-                    .send(builder.build(), java.net.http.HttpResponse.BodyHandlers.ofString());
-            return new RawResponse(res.statusCode(), res.headers().map(), res.body());
-        } catch (IOException | InterruptedException e) {
-            if (e instanceof InterruptedException) Thread.currentThread().interrupt();
-            throw new IllegalStateException("browser-style " + method + " " + path + " failed", e);
-        }
-    }
-
-    /** Status, headers and body of a raw browser-style request. */
-    private record RawResponse(int status, Map<String, List<String>> headers, String body) {
-        String header(String name) {
-            for (Map.Entry<String, List<String>> e : headers.entrySet()) {
-                if (name.equalsIgnoreCase(e.getKey()) && !e.getValue().isEmpty()) {
-                    return e.getValue().get(0);
-                }
-            }
-            return null;
-        }
-    }
-
     private static String sessionBody(String workflow) {
         return "{\"workflowType\":\"" + workflow + "\",\"deviceId\":\"E2E-CAM\"}";
     }
@@ -822,10 +785,6 @@ class LivenessPipelineIntegrationTest {
                 validateBody(challengeId).toString(), false));
     }
 
-    private String url(String path) {
-        return "http://localhost:" + port + path;
-    }
-
     private JsonNode postFrame(UUID sessionId, String frame) throws Exception {
         ObjectNode body = mapper.createObjectNode();
         body.put("frameBase64", frame);
@@ -850,21 +809,6 @@ class LivenessPipelineIntegrationTest {
                     ? e.getResponseHeaders() : new HttpHeaders();
             return new ResponseEntity<>(e.getResponseBodyAsString(), errorHeaders, e.getStatusCode());
         }
-    }
-
-    /** Headers Chrome sends on a same-origin policy save from the console. */
-    private HttpHeaders browserHeaders(String origin) {
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.set(HttpHeaders.ORIGIN, origin);
-        headers.set(HttpHeaders.REFERER, origin + "/");
-        headers.set(HttpHeaders.ACCEPT, "application/json, text/plain, */*");
-        headers.set("Sec-Fetch-Site", "same-origin");
-        headers.set("Sec-Fetch-Mode", "cors");
-        headers.set("Sec-Fetch-Dest", "empty");
-        headers.set(HttpHeaders.USER_AGENT,
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126 Safari/537.36");
-        return headers;
     }
 
     private JsonNode expect(HttpStatus expected, ResponseEntity<String> response) throws Exception {
