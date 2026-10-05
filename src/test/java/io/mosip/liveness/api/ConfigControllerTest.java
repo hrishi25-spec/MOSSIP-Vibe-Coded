@@ -232,6 +232,97 @@ class ConfigControllerTest {
         assertEquals("203.0.113.10", details.get("sourceIp"));
     }
 
+    // ------------------------------------------------ risk classification
+
+    @Test
+    void setPolicy_loweringThePassiveThreshold_isHighRisk() throws Exception {
+        when(configRepo.findByWorkflowType(WorkflowType.RESIDENT)).thenReturn(Optional.of(policy));
+        when(configRepo.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        mockMvc.perform(put("/api/v1/config/RESIDENT")
+                        .header(ConfigController.ADMIN_API_KEY_HEADER, ADMIN_KEY)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(ConfigPolicyUpdate.builder()
+                                .passiveThreshold(0.55).build())))
+                .andExpect(status().isOk());
+
+        ArgumentCaptor<AuditLog> saved = ArgumentCaptor.forClass(AuditLog.class);
+        verify(auditLogRepo).save(saved.capture());
+        // A lower threshold lets more spoofed frames pass, so the trail
+        // itself carries the warning — an operator must not have to
+        // diff the numbers to notice.
+        @SuppressWarnings("unchecked")
+        Map<String, Object> risk =
+                (Map<String, Object>) saved.getValue().getDetails().get("risk");
+        assertEquals("HIGH", risk.get("level"));
+        assertEquals(List.of("passiveThreshold lowered"), risk.get("reasons"));
+    }
+
+    @Test
+    void setPolicy_disablingActiveLiveness_isHighRisk() throws Exception {
+        when(configRepo.findByWorkflowType(WorkflowType.RESIDENT)).thenReturn(Optional.of(policy));
+        when(configRepo.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        mockMvc.perform(put("/api/v1/config/RESIDENT")
+                        .header(ConfigController.ADMIN_API_KEY_HEADER, ADMIN_KEY)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(ConfigPolicyUpdate.builder()
+                                .activeLivenessEnabled(false).build())))
+                .andExpect(status().isOk());
+
+        ArgumentCaptor<AuditLog> saved = ArgumentCaptor.forClass(AuditLog.class);
+        verify(auditLogRepo).save(saved.capture());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> risk =
+                (Map<String, Object>) saved.getValue().getDetails().get("risk");
+        assertEquals("HIGH", risk.get("level"));
+        assertEquals(List.of("active liveness disabled"), risk.get("reasons"));
+    }
+
+    @Test
+    void setPolicy_disablingLivenessEntirely_isHighRisk() throws Exception {
+        when(configRepo.findByWorkflowType(WorkflowType.RESIDENT)).thenReturn(Optional.of(policy));
+        when(configRepo.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        mockMvc.perform(put("/api/v1/config/RESIDENT")
+                        .header(ConfigController.ADMIN_API_KEY_HEADER, ADMIN_KEY)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(ConfigPolicyUpdate.builder()
+                                .livenessEnabled(false).build())))
+                .andExpect(status().isOk());
+
+        ArgumentCaptor<AuditLog> saved = ArgumentCaptor.forClass(AuditLog.class);
+        verify(auditLogRepo).save(saved.capture());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> risk =
+                (Map<String, Object>) saved.getValue().getDetails().get("risk");
+        assertEquals("HIGH", risk.get("level"));
+        assertEquals(List.of("liveness disabled"), risk.get("reasons"));
+    }
+
+    @Test
+    void setPolicy_strengtheningEdits_areLowRisk() throws Exception {
+        when(configRepo.findByWorkflowType(WorkflowType.RESIDENT)).thenReturn(Optional.of(policy));
+        when(configRepo.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        mockMvc.perform(put("/api/v1/config/RESIDENT")
+                        .header(ConfigController.ADMIN_API_KEY_HEADER, ADMIN_KEY)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        // Raised threshold, fewer retries: stricter than
+                        // the loaded policy, so nothing weakened.
+                        .content(objectMapper.writeValueAsString(ConfigPolicyUpdate.builder()
+                                .passiveThreshold(0.90).maxRetryCount(1).build())))
+                .andExpect(status().isOk());
+
+        ArgumentCaptor<AuditLog> saved = ArgumentCaptor.forClass(AuditLog.class);
+        verify(auditLogRepo).save(saved.capture());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> risk =
+                (Map<String, Object>) saved.getValue().getDetails().get("risk");
+        assertEquals("LOW", risk.get("level"));
+        assertEquals(List.of(), risk.get("reasons"));
+    }
+
     @Test
     void setPolicy_recordsTheForwardedClientIpNotTheProxy() throws Exception {
         when(configRepo.findByWorkflowType(WorkflowType.RESIDENT)).thenReturn(Optional.of(policy));

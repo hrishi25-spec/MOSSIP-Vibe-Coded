@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased] - 2026-10-05
 
 ### Added
+- Every `CONFIG_CHANGED` audit entry now carries a **risk classification**
+  (`details.risk`: `HIGH` or `LOW`, plus the named weakening moves).
+  An edit that lowers `passiveThreshold` or switches `livenessEnabled`
+  or `activeLivenessEnabled` off is flagged `HIGH`; everything else is
+  `LOW`. The console's **Policy change history** panel shows the level
+  on every entry and lists the reasons above the field diff, so a change
+  that quietly weakens PAD reads as an alert rather than a diff to be
+  hand-checked. Entries written before the classification have no `risk`
+  key and render an em dash. Because the classification is computed over
+  the diff and sealed inside the hashed `details` payload, it is covered
+  by the tamper-evidence below.
 - Config audit entries are now **immutable and tamper-evident**. Each
   `CONFIG_CHANGED` row stores `prev_hash` (the previous entry's hash, `GENESIS`
   for the first) and `entry_hash = SHA-256(prev_hash ‖ canonical(entry))`

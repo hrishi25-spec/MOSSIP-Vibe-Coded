@@ -11,7 +11,9 @@
  *   2. the per-field diff lists old → new for every pending change,
  *   3. switching workflows with pending edits asks first and aborts on "no",
  *   4. the Discard-edits button reloads the policy and drops the edits,
- *   5. beforeunload warns for a dirty form and for an in-flight session.
+ *   5. beforeunload warns for a dirty form and for an in-flight session,
+ *   6. the change history flags edits that weaken liveness (risk level
+ *      and the named reason, per entry).
  *
  * Run: node src/test/js/console-guards.test.mjs   (exit 0 = all assertions pass)
  *
@@ -180,6 +182,53 @@ const fetchCalls = [];
 let confirmAnswer = false;
 let hangFrames = false;   // when set, frame POSTs never answer (check in flight)
 
+// Sample policy-change history: one weakening edit (HIGH), one benign
+// edit (LOW), and one written before the risk classification existed
+// (no risk key — the console must not guess a level for it).
+const AUDIT = [
+  {
+    id: "audit-2",
+    eventType: "CONFIG_CHANGED",
+    workflowType: "RESIDENT",
+    createdAt: "2026-10-05T10:02:00Z",
+    details: {
+      workflowType: "RESIDENT",
+      action: "UPDATED",
+      actor: "key:9f2c1a7b4e0d",
+      sourceIp: "203.0.113.10",
+      changes: { passiveThreshold: { from: 0.8, to: 0.4 } },
+      risk: { level: "HIGH", reasons: ["passiveThreshold lowered"] }
+    }
+  },
+  {
+    id: "audit-1",
+    eventType: "CONFIG_CHANGED",
+    workflowType: "OPERATOR",
+    createdAt: "2026-10-05T10:01:00Z",
+    details: {
+      workflowType: "OPERATOR",
+      action: "UPDATED",
+      actor: "key:1a2b3c4d5e6f",
+      sourceIp: "unknown",
+      changes: { maxRetryCount: { from: 3, to: 1 } },
+      risk: { level: "LOW", reasons: [] }
+    }
+  },
+  {
+    id: "audit-0",
+    eventType: "CONFIG_CHANGED",
+    workflowType: "SUPERVISOR",
+    createdAt: "2026-10-04T09:00:00Z",
+    details: {
+      workflowType: "SUPERVISOR",
+      action: "CREATED",
+      actor: "key:abcdefabcdef",
+      sourceIp: "unknown",
+      changes: { passiveThreshold: { from: 0.5, to: 0.82 } }
+    }
+  }
+];
+
 async function fetch(url, options = {}) {
   const method = (options.method || "GET").toUpperCase();
   fetchCalls.push({ url, method, headers: options.headers || {} });
@@ -192,7 +241,7 @@ async function fetch(url, options = {}) {
   });
   if (url === "/health") return respond({ status: "UP", engine: "available" });
   if (url === "/api/v1/metrics") return respond({ framesProcessed: 1 });
-  if (url.startsWith("/api/v1/config/audit")) return respond([]);
+  if (url.startsWith("/api/v1/config/audit")) return respond(AUDIT);
   if (url.startsWith("/api/v1/config/")) {
     if (method === "PUT") return respond({ saved: true });
     return respond(POLICY);
@@ -364,6 +413,21 @@ assert(fetchCalls.some(c => c.method === "POST" && c.url === "/api/v1/sessions")
     "the run created a session before blocking on frames");
 assert(beforeunload().defaultPrevented === true,
     "closing or refreshing mid-check is intercepted while the session is in flight");
+
+section("policy change history — risk classification (item 23)");
+$id("btn-cfg-audit").dispatch("click");
+await settle();
+const history = () => $id("cfg-audit").textContent;
+assert(history().includes("RESIDENT  UPDATED  by key:9f2c1a7b4e0d  [risk: HIGH]"),
+    "a weakening edit shows its level on the entry line");
+assert(history().includes("! passiveThreshold lowered"),
+    "the reason names the weakening move, above the field diff");
+assert(history().includes("passiveThreshold: 0.8 → 0.4"),
+    "the field diff still renders under the risk line");
+assert(history().includes("OPERATOR  UPDATED  by key:1a2b3c4d5e6f  [risk: LOW]"),
+    "a benign edit shows LOW");
+assert(history().includes("SUPERVISOR  CREATED  by key:abcdefabcdef  [risk: —]"),
+    "an entry from before the classification shows an em dash, never a guessed level");
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

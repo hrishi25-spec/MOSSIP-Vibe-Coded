@@ -72,7 +72,8 @@ reports the first break and whether it was an edited row or a deleted one.
     "changes": {
       "passiveThreshold": { "from": 0.80, "to": 0.93 },
       "maxRetryCount": { "from": 3, "to": 4 }
-    }
+    },
+    "risk": { "level": "LOW", "reasons": [] }
   }
 }
 ```
@@ -85,6 +86,14 @@ reports the first break and whether it was an edited row or a deleted one.
 - **`actor`** is a truncated SHA-256 fingerprint of the presented admin key.
   The key itself is never stored, logged or echoed; the fingerprint only
   correlates edits made with the same key.
+- **`risk`** classifies how much the edit weakens the checks: `HIGH` when it
+  lowers `passiveThreshold` or switches `livenessEnabled` or
+  `activeLivenessEnabled` off — the moves that silently defeat liveness — and
+  `LOW` otherwise. `reasons` names which weakening move fired, so the console
+  flags the edit without the reader diffing two numbers. The classification is
+  computed over the diff and sealed inside the hashed `details`, so it cannot
+  be softened after the fact without breaking the chain. Entries written
+  before the classification existed simply have no `risk` key.
 - Config events have **no session**, so they never appear in a session's
   `audit` trail, and that trail can never pick one up (`session_id IS NULL`).
 - The feed is an open read, like `GET /api/v1/config/{workflowType}` (which

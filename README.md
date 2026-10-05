@@ -356,8 +356,11 @@ Hardening built into the service (no extra dependencies):
 - **Policy edits are audited** — the key alone must not be enough to weaken
   liveness silently. Each successful `PUT` writes a `CONFIG_CHANGED` entry in
   the *same transaction* as the policy update: which workflow, which fields
-  actually moved with old → new values, `CREATED` vs `UPDATED`, and a truncated
-  SHA-256 fingerprint of the key (never the key). Rejected requests record
+  actually moved with old → new values, `CREATED` vs `UPDATED`, a truncated
+  SHA-256 fingerprint of the key (never the key), and a **risk classification**
+  — an edit that lowers `passiveThreshold` or switches liveness (or active
+  liveness) off is flagged `HIGH`, with the weakening move named, so the
+  console shows the alert at a glance. Rejected requests record
   nothing. Read it back with `GET /api/v1/config/audit?limit=50`, or in the
   console's **Policy change history** panel.
   ```bash

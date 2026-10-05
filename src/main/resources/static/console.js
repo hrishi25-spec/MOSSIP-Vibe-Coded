@@ -749,8 +749,16 @@
       // payload's own copy. Fall back so an entry written before the column
       // existed still shows its workflow.
       const wf = e.workflowType || d.workflowType || "—";
+      // The risk classification is the alert: the level plus the named
+      // weakening move, so an edit that quietly lowers PAD reads as a
+      // warning rather than a diff to be hand-checked. Entries written
+      // before the classification existed show an em dash, never a guess.
+      const risk = d.risk || {};
+      const reasons = (risk.reasons || []).map(r => `    ! ${r}`).join("\n");
       return `${e.createdAt || "—"}  ${wf}  ${d.action || "—"}`
-        + `  by ${d.actor || "unknown"}\n${body}`;
+        + `  by ${d.actor || "unknown"}  [risk: ${risk.level || "—"}]`
+        + (reasons ? `\n${reasons}` : "")
+        + `\n${body}`;
     }).join("\n");
   }
 

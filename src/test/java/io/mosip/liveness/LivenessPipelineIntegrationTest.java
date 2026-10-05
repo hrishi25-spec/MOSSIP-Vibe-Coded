@@ -476,6 +476,13 @@ class LivenessPipelineIntegrationTest {
     void configChange_isTraceableInTheConfigAuditView() throws Exception {
         // A policy edit decides who passes liveness, so it is recorded the same
         // way a decision is: which workflow, which fields moved, under which key.
+        //
+        // Stage a known prior state first: test 3 leaves OPERATOR at threshold
+        // 1.0 with active liveness off, while an isolated run of this method
+        // starts from the seeded 0.82. Pinning the row makes the audited
+        // edit's direction — and therefore its risk level — the same either way.
+        expect(HttpStatus.OK, exchange(HttpMethod.PUT, "/api/v1/config/OPERATOR",
+                "{\"passiveThreshold\":0.95,\"activeLivenessEnabled\":true}", true));
         expect(HttpStatus.OK, exchange(HttpMethod.PUT, "/api/v1/config/OPERATOR",
                 "{\"passiveThreshold\":0.93,\"maxRetryCount\":4}", true));
 
@@ -500,6 +507,16 @@ class LivenessPipelineIntegrationTest {
         // …and the previous values, so the entry is self-contained.
         assertNotNull(changes.get("passiveThreshold").get("from"));
         assertNotNull(changes.get("maxRetryCount").get("from"));
+
+        // The risk classification rides on every entry. Staged at 0.95, the
+        // audited 0.93 lowers the threshold — the move that quietly defeats
+        // PAD — so the entry itself carries the warning, with the move named.
+        // (Active liveness was staged back on, so it is not part of the diff.)
+        JsonNode risk = entry.get("details").get("risk");
+        assertNotNull(risk, "every config change carries a risk classification");
+        assertEquals("HIGH", risk.get("level").asText());
+        assertEquals(1, risk.get("reasons").size());
+        assertEquals("passiveThreshold lowered", risk.get("reasons").get(0).asText());
 
         // Session trails stay session-scoped: an operator-level event has no
         // session and must never surface inside one.

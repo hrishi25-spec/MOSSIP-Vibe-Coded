@@ -29,6 +29,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.regex.Pattern;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -185,6 +186,10 @@ public class ConfigController {
      * authentication input — the address is read after {@code requireAdmin} has
      * already decided the caller is allowed — so the open GET paths are
      * untouched.</p>
+     *
+     * <p>Each entry also carries a {@link #classifyRisk(Map) risk}
+     * classification, so the trail answers "should this worry me" without
+     * an operator diffing two numbers by hand.</p>
      */
     private void auditPolicyChange(WorkflowType workflowType, boolean created,
                                    Map<String, Object> before, ConfigPolicy after,
@@ -207,6 +212,10 @@ public class ConfigController {
         details.put("actor", actorKeyId(adminKeyHeader));
         details.put("sourceIp", sourceIp(request));
         details.put("changes", changes);
+        // Computed over the diff and sealed inside the same details map
+        // the chain hashes: the classification cannot be softened after
+        // the fact without breaking the entry's own hash.
+        details.put("risk", classifyRisk(changes));
 
         auditLogRepo.save(chained(
                 AuditLog.builder()
@@ -217,6 +226,53 @@ public class ConfigController {
                         .workflowType(workflowType)
                         .details(details)
                         .build()));
+    }
+
+    /**
+     * Rates how much an edit weakens the checks it configures.
+     *
+     * <p>The moves that silently defeat liveness are {@code HIGH}: a lower
+     * passive threshold lets more spoofed frames through, and switching
+     * either liveness switch off turns the check into a rubber stamp.
+     * Everything else — a raised threshold, tightened retries — is
+     * {@code LOW}. {@code reasons} names which weakening move fired, so
+     * the console can flag the edit without the reader re-deriving it
+     * from the diff.</p>
+     *
+     * <p>Only fields present in {@code changes} are considered: an edit
+     * that did not move a field cannot have weakened it, and a no-op PUT
+     * classifies as the LOW it is.</p>
+     */
+    private static Map<String, Object> classifyRisk(Map<String, Object> changes) {
+        List<String> reasons = new ArrayList<>();
+        if (lowered(changes, "passiveThreshold")) {
+            reasons.add("passiveThreshold lowered");
+        }
+        if (switchedOff(changes, "livenessEnabled")) {
+            reasons.add("liveness disabled");
+        }
+        if (switchedOff(changes, "activeLivenessEnabled")) {
+            reasons.add("active liveness disabled");
+        }
+        Map<String, Object> risk = new LinkedHashMap<>();
+        risk.put("level", reasons.isEmpty() ? "LOW" : "HIGH");
+        risk.put("reasons", reasons);
+        return risk;
+    }
+
+    /** A numeric field whose new value is strictly below its old one. */
+    private static boolean lowered(Map<String, Object> changes, String field) {
+        return changes.get(field) instanceof Map<?, ?> moved
+                && moved.get("from") instanceof Number from
+                && moved.get("to") instanceof Number to
+                && to.doubleValue() < from.doubleValue();
+    }
+
+    /** A boolean field flipped from its on-state to its off-state. */
+    private static boolean switchedOff(Map<String, Object> changes, String field) {
+        return changes.get(field) instanceof Map<?, ?> moved
+                && Boolean.TRUE.equals(moved.get("from"))
+                && Boolean.FALSE.equals(moved.get("to"));
     }
 
     /**
