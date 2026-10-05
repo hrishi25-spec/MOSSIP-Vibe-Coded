@@ -236,6 +236,55 @@ jobs:
       - name: Build the image and smoke test the container
         run: ./scripts/smoke-docker.sh
 
+  # Boot-time gate: the packaged jar booted N times, each from a
+  # *cold* OpenCV native cache, with the median time-to-/health
+  # reported to the step summary and a generous budget enforced.
+  #
+  # Nothing else in this workflow notices a slow boot. The smoke test
+  # proves the jar *can* boot; a new eager bean, an extra Flyway
+  # migration or a dependency that scans the classpath at startup all
+  # ship green and surface only as "deployments are slow now". The
+  # native cache is cleared before every boot because openpnp extracts
+  # the ~65 MB OpenCV native once per machine — without that, boots
+  # 2..N would reuse the cache and measure the warm case, while the
+  # case a fresh deployment (or a fresh runner) actually hits is cold.
+  #
+  # The budget is ~3x the measured ~43 s on purpose: this gate exists
+  # to catch a regression that doubles boot, not to shave seconds.
+  #
+  # Builds its own jar rather than downloading the package job's
+  # artifact: that upload is branch-gated, so on a pull request there
+  # would be nothing to download (same reasoning as the docker job).
+  # Slim because that is what CI, the Docker image and most deployments
+  # actually run; BOOT_MEDIAN_JAR=full measures the full jar instead.
+  #
+  # Lives in a script, not inline, so it is runnable locally with
+  # ./scripts/boot-median.sh (BOOT_MEDIAN_JAR=full|slim).
+  boot-time:
+    name: Cold boot time (median)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [test, console]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Package the slim jar to measure
+        run: ./mvnw --batch-mode clean package -DskipTests -Pslim
+
+      - name: Measure median cold boot time
+        env:
+          BOOT_MEDIAN_RUNS: '5'
+          BOOT_MEDIAN_MAX_SECONDS: '120'
+        run: ./scripts/boot-median.sh
+
   # The schema gate — the only job that compares the entities against the Flyway
   # migrations on the database that actually ships.
   #
