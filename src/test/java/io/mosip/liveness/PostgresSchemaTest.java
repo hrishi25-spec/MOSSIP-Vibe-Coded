@@ -5,12 +5,15 @@ import io.mosip.liveness.models.entity.LivenessSession;
 import io.mosip.liveness.models.enums.LivenessStage;
 import io.mosip.liveness.models.enums.SessionStatus;
 import io.mosip.liveness.models.enums.WorkflowType;
+import org.flywaydb.core.api.MigrationVersion;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.core.env.Environment;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import javax.sql.DataSource;
@@ -88,20 +91,45 @@ class PostgresSchemaTest {
 
     @Test
     @DisplayName("applies every committed migration")
-    void flywayAppliedAllMigrations() {
+    void flywayAppliedAllMigrations() throws Exception {
         // Flyway builds the schema; if it silently no-opped, `validate` would
         // be checking an empty database and would fail loudly — but this makes
         // the reason legible instead of mysterious.
+        //
+        // The expectation is read off the committed migration files rather than
+        // hardcoded: this assertion used to pin the latest version to V4, so the
+        // moment the migrations were renumbered past V4 the gate went red for a
+        // reason that had nothing to do with the schema.
+        Resource[] committed = new PathMatchingResourcePatternResolver()
+                .getResources("classpath*:db/migration/V*.sql");
+        MigrationVersion latestCommitted = null;
+        for (Resource resource : committed) {
+            String name = resource.getFilename();
+            assertNotNull(name, "classpath migration resource has no filename");
+            int separator = name.indexOf("__");
+            assertTrue(separator > 1,
+                    "migration filename must be V<version>__<description>.sql, found " + name);
+            MigrationVersion version = MigrationVersion.fromVersion(name.substring(1, separator));
+            if (latestCommitted == null || version.compareTo(latestCommitted) > 0) {
+                latestCommitted = version;
+            }
+        }
+        assertNotNull(latestCommitted, "no V*.sql migrations found on the classpath");
+
         Integer applied = jdbc.queryForObject(
                 "SELECT count(*) FROM flyway_schema_history WHERE success = true", Integer.class);
         assertNotNull(applied);
-        assertTrue(applied >= 4,
-                "expected at least V1-V4 to be applied, found " + applied);
+        assertTrue(applied >= committed.length,
+                "expected at least one history row per committed migration ("
+                        + committed.length + " files, latest V" + latestCommitted
+                        + "), found " + applied);
 
         String latest = jdbc.queryForObject(
                 "SELECT version FROM flyway_schema_history WHERE success = true "
                         + "ORDER BY installed_rank DESC LIMIT 1", String.class);
-        assertEquals("4", latest, "latest applied migration should be V4");
+        assertEquals(latestCommitted.toString(), latest,
+                "latest applied migration should be V" + latestCommitted
+                        + " — every committed migration must be applied");
     }
 
     @Test

@@ -1,4 +1,4 @@
--- Flyway migration: V6__audit_chain_immutability.sql
+-- Flyway migration: V9__audit_chain_immutability.sql
 --
 -- Config policy edits are the highest-consequence thing an operator can do
 -- here — passiveThreshold decides who passes liveness — and until now the trail

@@ -1,4 +1,4 @@
--- Flyway migration: V5__audit_logs_workflow_type.sql
+-- Flyway migration: V8__audit_logs_workflow_type.sql
 --
 -- Which workflow an audit entry concerns was previously recoverable only by
 -- parsing the details JSON — and only for config edits, because that is where

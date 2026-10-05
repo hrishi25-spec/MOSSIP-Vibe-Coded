@@ -310,10 +310,10 @@ GET /api/v1/sessions/{sessionId}/audit
 
 GET /api/v1/config/audit?limit=50      # operator view: policy edits, newest first
   → [ { id, eventType: "CONFIG_CHANGED", workflowType, details: {workflowType, action, actor, changes}, createdAt }, ... ]
-GET /api/v1/config/audit?limit=50&workflowType=RESIDENT   # same, narrowed in SQL via audit_logs.workflow_type (V5)
+GET /api/v1/config/audit?limit=50&workflowType=RESIDENT   # same, narrowed in SQL via audit_logs.workflow_type (V8)
 ```
 
-`audit_logs.session_id` is nullable (migration V4): `NULL` means an
+`audit_logs.session_id` is nullable (migration V7): `NULL` means an
 operator-level event — currently only `CONFIG_CHANGED`, written in the same
 transaction as the policy `PUT`. A policy edit decides who passes liveness, so it
 is recorded like any decision: the fields that actually moved with their old and

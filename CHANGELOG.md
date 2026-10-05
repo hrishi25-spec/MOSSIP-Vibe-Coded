@@ -8,7 +8,7 @@ All notable changes to this project will be documented in this file.
 - Config audit entries are now **immutable and tamper-evident**. Each
   `CONFIG_CHANGED` row stores `prev_hash` (the previous entry's hash, `GENESIS`
   for the first) and `entry_hash = SHA-256(prev_hash ‖ canonical(entry))`
-  (`V6__audit_chain_immutability.sql`), so editing a row invalidates its own
+  (`V9__audit_chain_immutability.sql`), so editing a row invalidates its own
   hash and deleting one leaves every successor pointing at a hash that no
   longer follows. Immutability is enforced by the **database**, not by Java:
   `BEFORE UPDATE` / `BEFORE DELETE` triggers that raise, because a Java-side
@@ -48,7 +48,7 @@ All notable changes to this project will be documented in this file.
   chain. Closing that means keying the hash with a secret the database does not
   hold (HMAC, secret from the environment) or anchoring the chain head where a
   database writer cannot reach. Neither is done here.
-- `audit_logs` gained a `workflow_type` column (`V5__audit_logs_workflow_type.sql`),
+- `audit_logs` gained a `workflow_type` column (`V8__audit_logs_workflow_type.sql`),
   so `GET /api/v1/config/audit` can be filtered **in the database** with
   `?workflowType=`. The audit table grows one row per frame decision, so
   narrowing in the browser meant paging through the entire pipeline history to

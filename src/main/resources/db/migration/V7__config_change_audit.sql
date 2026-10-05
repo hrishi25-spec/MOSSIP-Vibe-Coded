@@ -1,4 +1,4 @@
--- Flyway migration: V4__config_change_audit.sql
+-- Flyway migration: V7__config_change_audit.sql
 --
 -- Policy edits (PUT /api/v1/config/{workflowType}) decide who passes liveness,
 -- so they belong in the same trail as the decisions they cause. They have no
