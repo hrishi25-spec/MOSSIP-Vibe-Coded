@@ -70,6 +70,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li>RESIDENT policy saved the way the browser console saves it (Chrome
  *       headers, CORS preflight, {@code X-Admin-API-Key}) — accepted and audited,
  *       refused without the key or from a foreign origin.</li>
+ *   <li>Every mutating console call (sessions, frames, challenge
+ *       validation, close, config PUT) answers its CORS preflight from
+ *       an allowed cross-origin dev server, clearing the headers the
+ *       console needs.</li>
  * </ul>
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
@@ -596,6 +600,58 @@ class LivenessPipelineIntegrationTest {
                 exchange(HttpMethod.GET, "/api/v1/config/RESIDENT", null, false));
         assertEquals(25000, unchanged.get("challengeTimeoutMs").asInt(),
                 "a cross-origin PUT must not change the policy either");
+    }
+
+    // ------------------------------------------------------------------ 8b. preflights for every mutating console call
+
+    @Test
+    void browserStylePreflights_coverEveryMutatingConsoleCall() throws Exception {
+        String devServerOrigin = "http://localhost:5173";  // the console on another dev port
+
+        // A real session, so the frame/challenge/close paths are the
+        // ones the console actually calls. The preflight itself never
+        // reaches the controller — the CORS processor answers it — but
+        // the paths must still be routable for a future reader.
+        UUID sessionId = UUID.fromString(expect(HttpStatus.CREATED,
+                exchange(HttpMethod.POST, "/api/v1/sessions",
+                        sessionBody("RESIDENT"), false)).get("id").asText());
+
+        // The complete inventory of console calls a browser prefights
+        // (anything non-simple: a JSON body, or the admin-key header).
+        // The plain GETs (health, metrics, config, audit) are simple
+        // requests — no preflight is sent for them, so there is nothing
+        // to pin beyond the CORS mapping itself, which this test
+        // exercises for every route family here.
+        String[][] preflighted = {
+                {"POST", "/api/v1/sessions", "content-type"},
+                {"POST", "/api/v1/sessions/" + sessionId + "/frames", "content-type"},
+                {"POST", "/api/v1/sessions/" + sessionId + "/challenges/validate", "content-type"},
+                {"POST", "/api/v1/sessions/" + sessionId + "/close", "content-type"},
+                {"PUT", RESIDENT_CONFIG, "content-type, x-admin-api-key"},
+        };
+        for (String[] call : preflighted) {
+            HttpHeaders preflight = browserHeaders(devServerOrigin);
+            preflight.set(HttpHeaders.ACCESS_CONTROL_REQUEST_METHOD, call[0]);
+            preflight.set(HttpHeaders.ACCESS_CONTROL_REQUEST_HEADERS, call[2]);
+            RawResponse options = send(HttpMethod.OPTIONS, call[1], null, preflight);
+
+            String what = call[0] + " " + call[1];
+            assertEquals(200, options.status(), "preflight must be allowed: " + what);
+            assertEquals(devServerOrigin, options.header(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN),
+                    "the requesting origin must be echoed back, not a wildcard: " + what);
+            String allowedMethods = options.header(HttpHeaders.ACCESS_CONTROL_ALLOW_METHODS);
+            assertNotNull(allowedMethods, "preflight must advertise allowed methods: " + what);
+            assertTrue(allowedMethods.contains(call[0]),
+                    allowedMethods + " must include " + call[0] + " for " + what);
+            String allowedHeaders = options.header(HttpHeaders.ACCESS_CONTROL_ALLOW_HEADERS);
+            assertNotNull(allowedHeaders, "preflight must allow the requested headers: " + what);
+            // Every header the console needs must be cleared for use,
+            // or the browser blocks the real request before it is sent.
+            for (String header : call[2].split(", ")) {
+                assertTrue(allowedHeaders.toLowerCase().contains(header),
+                        allowedHeaders + " must clear " + header + " for " + what);
+            }
+        }
     }
 
     // ------------------------------------------------------------------ 9. published rate-limit budget
