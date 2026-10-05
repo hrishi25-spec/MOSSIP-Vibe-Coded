@@ -488,7 +488,28 @@
   const CFG_FIELDS = [cfg.threshold, cfg.timeout, cfg.minChallenges, cfg.retries,
                       cfg.failure, cfg.liveness, cfg.active,
                       ...CFG_TYPES.map(([box]) => box)];
+  // The same state seen field by field, in payload names: the diff panel renders
+  // these and the baseline captured below is what "discard" restores. One list
+  // drives both, so the preview and the discard can never disagree about what
+  // is pending. The four challenge checkboxes are one API field
+  // (challengeTypes), so they are compared as one row.
+  const CFG_COMPARE = [
+    { label: "passiveThreshold", get: () => cfg.threshold.value },
+    { label: "challengeTimeoutMs", get: () => cfg.timeout.value },
+    { label: "minChallengeCount", get: () => cfg.minChallenges.value },
+    { label: "maxRetryCount", get: () => cfg.retries.value },
+    { label: "onRepeatedFailure", get: () => cfg.failure.value },
+    { label: "livenessEnabled", get: () => cfg.liveness.checked },
+    { label: "activeLivenessEnabled", get: () => cfg.active.checked },
+    { label: "challengeTypes", get: () => CFG_TYPES.filter(([box]) => box.checked)
+        .map(([, name]) => name).join(", ") || "(none)" }
+  ];
   let baseline = "";
+  // Field values as of the last load/save: the restore target for "Discard
+  // edits". Captured separately from `baseline` (a joined fingerprint) because
+  // restoring needs per-field values, and so does the old side of the diff.
+  let baselineValues = null;
+  let baselineCompare = null;
   let loadedWorkflow = cfg.workflow.value;
   let dirtyShown = false;
 
@@ -501,8 +522,12 @@
 
   function markClean(workflow) {
     baseline = formFingerprint();
+    baselineValues = new Map(CFG_FIELDS.map(
+        el => [el, el.type === "checkbox" ? el.checked : el.value]));
+    baselineCompare = CFG_COMPARE.map(f => f.get());
     loadedWorkflow = workflow || cfg.workflow.value;
     refreshDirtyMark();
+    refreshDiff();
   }
 
   // Both transitions matter: the marker appears on the first edit and clears
@@ -522,6 +547,58 @@
     cfg.status.className = "cfg-status dirty";
   }
 
+  // "Unsaved changes" says *that* the form moved, not *what* — and a threshold
+  // edit is exactly the kind of change worth re-reading before it decides who
+  // passes liveness. Every field that differs from the loaded policy is listed
+  // as old → new while edits are pending; the panel disappears the moment the
+  // form matches the policy again (reverted by hand, saved, or discarded).
+  function refreshDiff() {
+    const box = $("cfg-diff");
+    box.textContent = "";
+    if (!baselineCompare) { box.hidden = true; return; }
+    const pending = CFG_COMPARE
+        .map((f, i) => ({ label: f.label, from: baselineCompare[i], to: f.get() }))
+        .filter(c => String(c.from) !== String(c.to));
+    if (!pending.length) { box.hidden = true; return; }
+
+    const title = document.createElement("div");
+    title.className = "cfg-diff-title";
+    title.textContent = `Pending changes — ${pending.length} field${pending.length > 1 ? "s" : ""} `
+        + `${pending.length > 1 ? "differ" : "differs"} from the loaded ${loadedWorkflow} policy`;
+    box.append(title);
+    for (const c of pending) {
+      const row = document.createElement("div");
+      row.className = "cfg-diff-row";
+      const label = document.createElement("span");
+      label.className = "cfg-diff-label";
+      label.textContent = c.label;
+      const from = document.createElement("span");
+      from.className = "cfg-diff-from";
+      from.textContent = String(c.from);
+      const arrow = document.createElement("span");
+      arrow.className = "cfg-diff-arrow";
+      arrow.textContent = "→";
+      const to = document.createElement("span");
+      to.className = "cfg-diff-to";
+      to.textContent = String(c.to);
+      row.append(label, from, arrow, to);
+      box.append(row);
+    }
+    box.hidden = false;
+  }
+
+  // Put every field back to the copy captured at the last load/save. Works
+  // offline: discarding must not depend on the reload request succeeding.
+  function restoreBaseline() {
+    if (!baselineValues) return;
+    CFG_FIELDS.forEach(el => {
+      const v = baselineValues.get(el);
+      if (el.type === "checkbox") el.checked = v;
+      else el.value = v;
+    });
+    markClean(loadedWorkflow);
+  }
+
   // Ask before anything that replaces the form. Returns false to abort, and
   // puts the workflow select back so the UI matches what is actually loaded.
   // Only an explicit "yes" proceeds: if confirm() is unavailable (some embedded
@@ -538,8 +615,9 @@
   }
 
   CFG_FIELDS.forEach(el => {
-    el.addEventListener("input", refreshDirtyMark);
-    el.addEventListener("change", refreshDirtyMark);
+    const onEdit = () => { refreshDirtyMark(); refreshDiff(); };
+    el.addEventListener("input", onEdit);
+    el.addEventListener("change", onEdit);
   });
 
   async function loadConfig() {
@@ -607,13 +685,34 @@
   });
   $("btn-cfg-save").addEventListener("click", () =>
     saveConfig().catch(e => cfgStatus(e.message, false)));
+  // Explicit "drop my edits": the same reload the workflow dropdown performs,
+  // without having to switch workflows (and without the confirm dialog — the
+  // click itself is the intent; the confirm exists to catch *unintended*
+  // replacements). Re-reads the server's copy; if that fails, the captured copy
+  // still restores the form, so discarding works offline.
+  $("btn-cfg-discard").addEventListener("click", async () => {
+    if (!isDirty()) {
+      cfgStatus(`No pending edits — the form matches the loaded ${loadedWorkflow} policy.`, true);
+      return;
+    }
+    try {
+      await loadConfig();
+      cfgStatus(`Discarded pending edits — reloaded the ${loadedWorkflow} policy.`, true);
+    } catch (e) {
+      restoreBaseline();
+      cfgStatus(`Reload failed (${e.message}); restored the last loaded ${loadedWorkflow} policy.`, false);
+    }
+  });
   cfg.workflow.addEventListener("change", () => {
     if (!confirmDiscard(cfg.workflow.value)) return;
     loadConfig().catch(e => cfgStatus(e.message, false));
   });
-  // Closing or reloading the tab loses the same edits.
+  // Closing or reloading the tab loses the same edits — and, mid-check, the
+  // in-flight session with them: the run is abandoned part-pipeline and the
+  // verdict never arrives. The browser only offers its generic prompt here, but
+  // that is enough to stop a stray refresh during capture.
   window.addEventListener("beforeunload", e => {
-    if (!isDirty()) return;
+    if (!isDirty() && !running) return;
     e.preventDefault();
     e.returnValue = "";
   });

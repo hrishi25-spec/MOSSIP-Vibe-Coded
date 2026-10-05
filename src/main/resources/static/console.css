@@ -73,6 +73,18 @@ pre{margin:0;font:12px/1.5 var(--mono);white-space:pre-wrap;word-break:break-wor
 .chk{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer}
 .chk input{width:auto}
 .cfg-status{font-size:12px;margin-top:9px;min-height:16px}
+/* Per-field preview of what saving would change: the loaded value struck
+   through, the pending value highlighted. Hidden entirely when the form
+   matches the loaded policy. */
+.cfg-diff{margin-top:12px;border:1px solid #5b4a1d;background:#241f12;
+  border-radius:8px;padding:10px 12px}
+.cfg-diff .cfg-diff-title{font-size:11px;font-weight:600;letter-spacing:.4px;
+  text-transform:uppercase;color:var(--warn);margin-bottom:7px}
+.cfg-diff .cfg-diff-row{display:flex;gap:8px;flex-wrap:wrap;font:12px/1.6 var(--mono)}
+.cfg-diff-label{color:var(--warn);min-width:170px}
+.cfg-diff-from{color:var(--muted);text-decoration:line-through}
+.cfg-diff-arrow{color:var(--muted)}
+.cfg-diff-to{color:#f0dca6;font-weight:600}
 .key-hint{font-size:11px;color:var(--ok);letter-spacing:.5px}
 
 /* Request budget meters (rate limiter) */
