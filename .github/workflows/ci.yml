@@ -492,3 +492,63 @@ jobs:
               --generate-notes \
               "${PRERELEASE[@]}"
           fi
+
+  # Publishes the Docker image for a release tag. The jar ships as a
+  # release asset (job above); this makes the container delivery path
+  # carry the same tag, so a version ships both ways at once and a
+  # deployment can pick either artifact at the same version.
+  #
+  # Needs the release job, not just test: "promotes a successful
+  # release" means the release — jars, checksums and all — exists
+  # before an image is published under its tag. A release that failed
+  # to publish must not have an image claiming the same version.
+  #
+  # Canaries ride along: a v1.1.0-canary.1 tag publishes a
+  # v1.1.0-canary.1 image, matching the prerelease it belongs to.
+  docker-release:
+    name: Publish Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: release
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    permissions:
+      contents: read
+      # Pushing to ghcr.io is a package write; the release job's
+      # contents: write is deliberately not inherited here.
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      # Same build the release job's slim asset went through, so the
+      # image contains a jar stamped with the release version rather
+      # than a snapshot.
+      - name: Package the slim jar the image is built from
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -uo pipefail
+          ./mvnw --batch-mode -DskipTests -Drevision="${TAG#v}" clean package -Pslim
+
+      # The smoke script builds the image, boots it, and asserts /health
+      # and the non-root user — so the image that gets pushed is exactly
+      # the one that passed the gate. SMOKE_IMAGE names the target:
+      # ghcr.io/<owner>/<repo>:<release-tag>, lowercased because GHCR
+      # rejects uppercase repository names.
+      - name: Build, smoke test and publish the image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_REF_NAME}"
+          SMOKE_IMAGE="$IMAGE" ./scripts/smoke-docker.sh
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE"
+          echo "published $IMAGE"
