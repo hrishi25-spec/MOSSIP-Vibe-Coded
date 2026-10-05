@@ -13,7 +13,9 @@
  *   4. the Discard-edits button reloads the policy and drops the edits,
  *   5. beforeunload warns for a dirty form and for an in-flight session,
  *   6. the change history flags edits that weaken liveness (risk level
- *      and the named reason, per entry).
+ *      and the named reason, per entry),
+ *   7. the change history loads with the page, so the key fingerprint
+ *      behind the most recent edit is visible at a glance.
  *
  * Run: node src/test/js/console-guards.test.mjs   (exit 0 = all assertions pass)
  *
@@ -327,6 +329,19 @@ assert(status().textContent.includes("Loaded RESIDENT policy"),
 assert(!isDirtyShown(), "a freshly loaded form is not dirty");
 assert(diff().hidden === true, "the diff panel starts hidden");
 assert($id("cfg-workflow").value === "RESIDENT", "the workflow select starts on RESIDENT");
+
+section("change history loads with the page (item 24)");
+// No click on #btn-cfg-audit has happened yet: the fingerprint of the
+// key behind the newest edit must already be rendered, next to the
+// entry it belongs to, so an operator confirms at a glance which key
+// made the most recent change.
+const auditPanel = () => $id("cfg-audit").textContent;
+assert(auditPanel().includes("RESIDENT  UPDATED  by key:9f2c1a7b4e0d"),
+    "the newest edit shows which key made it, without clicking refresh");
+assert(auditPanel().includes("[risk: HIGH]"),
+    "the newest edit's risk level is visible at a glance too");
+assert(auditPanel().includes("key:1a2b3c4d5e6f") && auditPanel().includes("key:abcdefabcdef"),
+    "every entry in the page carries its own key fingerprint");
 
 section("per-field diff (item 1)");
 edit($id("cfg-threshold"), "0.55");

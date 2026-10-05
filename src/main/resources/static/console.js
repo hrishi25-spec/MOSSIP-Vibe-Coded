@@ -772,6 +772,11 @@
   refreshMetrics();
   // First policy load is a plain open GET — no key needed.
   loadConfig().catch(e => cfgStatus(e.message, false));
+  // The change history loads with the page too, so the fingerprint
+  // of the key behind the most recent edit — and its risk level —
+  // are visible at a glance, not only after clicking refresh.
+  // Same open GET as the policy read; no key needed.
+  loadConfigAudit().catch(e => cfgStatus(e.message, false));
   // Skip health polling while the tab is hidden — no reason to spend CPU/battery
   // refreshing a console nobody is looking at.
   setInterval(() => { if (!document.hidden) refreshHealth(); }, 15000);

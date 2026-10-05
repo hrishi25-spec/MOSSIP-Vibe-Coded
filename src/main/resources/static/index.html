@@ -168,9 +168,12 @@
         <pre id="cfg-audit">No policy changes recorded yet.</pre>
         <p class="hint">Every <code>PUT</code> to <code>/api/v1/config/{workflow}</code> is
           recorded with the fields that moved, their previous and new values, and a
-          fingerprint of the admin key that made the change. Edits that lower the
-          passive threshold or switch liveness off are marked
-          <code>[risk: HIGH]</code>, with the reason.</p>
+          fingerprint of the admin key that made the change, shown next to
+          each entry so it is clear at a glance which key did the edit.
+          Edits that lower the passive threshold or switch liveness off are
+          marked <code>[risk: HIGH]</code>, with the reason. The history
+          loads with the page, so the most recent edit is visible without
+          clicking refresh.</p>
       </div>
     </section>
   </div>
