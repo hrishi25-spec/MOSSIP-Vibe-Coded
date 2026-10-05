@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased] - 2026-10-04
+## [Unreleased] - 2026-10-05
 
 ### Added
 - Config audit entries are now **immutable and tamper-evident**. Each
@@ -369,32 +369,40 @@ All notable changes to this project will be documented in this file.
   (Hibernate DDL 7.8 s, OpenCV natives 6.4 s, Tomcat + beans 7.1 s); Flyway
   cannot replace that DDL on H2 because the migrations are Postgres-specific
   (`TIMESTAMPTZ`), so dev/integration boots keep `ddl-auto: create-drop`
-- OpenCV native warm-up now runs on a background `opencv-warmup` daemon thread
-  started from `PadLivenessApplication.main()` before `SpringApplication.run()`,
-  so the ~65 MB extraction overlaps context refresh instead of running serially
-  in front of it. `ensureOpenCvLoaded()` is unchanged as the synchronous
-  barrier — it still loads at most once and still blocks until the attempt has
-  settled, so `PassiveScoringService` waits exactly as before and
-  `isOpenCvAvailable()` (a plain non-blocking read) can never be observed
-  mid-warm by a request, because that mandatory singleton settles the flag
-  before refresh ends. `openCvAttempted` became volatile since the fast path is
-  now read across threads.
-  **Measured, and the headline claim did not hold.** Seven interleaved A/B boots
-  per variant on the same box: baseline mean 46.47 s / median 46.02 s, warm-up
-  mean 47.25 s / median 48.14 s — indistinguishable. The timeline shows the
-  load *does* leave the critical path (baseline occupies +35.5 s → +41.5 s,
-  warm +0 s → +4.8 s), but the warm thread costs ~4.5 s in CPU contention with
-  the main thread on 4 cores, netting ~1.5 s in the best pair. The original
-  "~6 s" figure came from a cold page cache; warm, the load is only ~3.8 s and
-  there is nothing to hide. It may still pay off on cold-cache CI runners, which
-  could not be verified here (dropping caches needs root). Kept because it is
-  behaviour-neutral and correct, not because it is proven faster.
+- OpenCV (and the MiniFASNet model) now load **lazily on first use** — no boot
+  step waits for either. `PadLivenessApplication.main()` still starts an
+  `opencv-warmup` daemon thread before `SpringApplication.run()` so the ~65 MB
+  extraction overlaps context refresh, and `PassiveScoringService` resolves its
+  scorer (natives + model) on its first caller instead of in its constructor;
+  `ensureOpenCvLoaded()` remains the synchronous barrier — it loads at most once
+  and blocks only if the background attempt has not settled by the time a frame
+  arrives, which is the rare case (a boot that reaches a request takes longer
+  than the load). `isOpenCvAvailable()` (a plain non-blocking read) is therefore
+  eventually consistent at boot: `/health` reports the engine as unavailable
+  until the warm settles — accurate, and what the smoke test waits for.
+  `openCvAttempted` is volatile since the fast path is now read across threads.
+  **Measured earlier for the overlap-only variant, and the headline claim did
+  not hold.** Seven interleaved A/B boots per variant on the same box: baseline
+  mean 46.47 s / median 46.02 s, warm-up mean 47.25 s / median 48.14 s —
+  indistinguishable. The timeline shows the load *does* leave the critical path
+  (baseline occupies +35.5 s → +41.5 s, warm +0 s → +4.8 s), but the warm
+  thread costs ~4.5 s in CPU contention with the main thread on 4 cores, netting
+  ~1.5 s in the best pair. The original "~6 s" figure came from a cold page
+  cache; warm, the load is only ~3.8 s and there is nothing to hide. It may
+  still pay off on cold-cache CI runners, which could not be verified here
+  (dropping caches needs root). Kept because it is behaviour-neutral and correct,
+  not because it is proven faster.
   Two findings worth keeping: logback **silently drops** events logged from the
   warm thread, because it starts before Spring Boot initialises its logging
-  system — so the outcome is now reported once from `ensureOpenCvLoaded()`'s
-  caller (a configured context) and the warm thread loads silently, otherwise
-  the "OpenCV native library loaded successfully" line vanishes from packaged
-  builds. That line now carries the measured millisecond cost.
+  system — the JVM's own fat-jar class-loading can outlast the entire native
+  load, so the attempt may settle before `run()` even begins. The outcome is
+  therefore reported from the main thread: from `init()` once Spring is
+  configuring beans (the common case — the line lands ~16 s before
+  `Started PadLivenessApplication`), or, if the attempt is still in flight, by a
+  short-lived daemon that joins the warm-up thread and reports the moment it
+  settles; `ensureOpenCvLoaded()`'s caller is the last resort on the first
+  frame. The warm thread itself never logs. The outcome line carries the
+  measured millisecond cost.
 
 ### Security
 - `PUT /api/v1/config/{workflowType}` now requires an `X-Admin-API-Key` header

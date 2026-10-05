@@ -153,6 +153,11 @@ class LivenessPipelineIntegrationTest {
 
     @BeforeEach
     void requireOpenCv() {
+        // The native load warms in the background during boot, so without a
+        // barrier this assumption would test timing rather than availability:
+        // a still-loading warm would skip every test below. ensureOpenCvLoaded
+        // returns immediately once the attempt has settled.
+        AppConfig.ensureOpenCvLoaded();
         // Same guard convention as ImageUtilsCascadeTest: without natives no
         // frame can detect a face and the pipeline cannot be exercised.
         Assumptions.assumeTrue(AppConfig.isOpenCvAvailable(),

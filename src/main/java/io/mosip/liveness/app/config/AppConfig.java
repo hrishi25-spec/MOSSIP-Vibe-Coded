@@ -68,23 +68,29 @@ public class AppConfig {
     private static boolean openCvOutcomeReported;
 
     /**
-     * Kicks off the native-library load on a background thread so it overlaps
-     * the rest of context refresh instead of running serially in front of it.
+     * Kicks off the native-library load on a background thread so the
+     * context refresh never waits for it.
      *
      * <p>openpnp extracts a ~65 MB {@code libopencv_java490.so} into a temp
-     * directory and {@code System.load}s it; that measured ~6.1 s, and it used
-     * to run on the {@code main} thread before any other bean was created.
-     * Most of it is file I/O, so it overlaps cleanly with Hibernate DDL and
-     * Tomcat initialisation on another core.</p>
+     * directory and {@code System.load}s it; that measured ~6.1 s. It used to
+     * run serially in front of every other bean — first on the {@code main}
+     * thread, then (after the async warm-up landed) blocking {@code init()}
+     * and {@code PassiveScoringService}'s constructor, which still made every
+     * boot pay the full price.</p>
      *
-     * <p>This changes <em>when</em> the load starts, never <em>what</em> it
-     * returns. {@link #ensureOpenCvLoaded()} still blocks until the attempt has
-     * settled, so any bean that genuinely needs the library
-     * ({@code PassiveScoringService}, which builds a Haar cascade while loading
-     * the MiniFASNet model) waits exactly as it did before. Because that bean is
-     * a mandatory singleton, the flag is settled before the context finishes
-     * refreshing, so {@link #isOpenCvAvailable()} — a plain, non-blocking read,
-     * as it has always been — can never be observed mid-warm by a request.</p>
+     * <p>Now nothing at boot waits: the load settles on this thread while the
+     * context refreshes, and the <em>first frame submission</em> is what
+     * actually needs the library — {@link #ensureOpenCvLoaded()} blocks only
+     * if the background attempt has not settled by then, which is the rare
+     * case (the load takes seconds; a boot that reaches a request takes
+     * longer). {@code PassiveScoringService} likewise defers the MiniFASNet
+     * model to first use, so no bean's creation depends on any of this.</p>
+     *
+     * <p>{@link #isOpenCvAvailable()} is therefore eventually consistent at
+     * boot: a request in the first seconds after startup can read {@code false}
+     * while the load is still in flight. The only consumer at rest is
+     * {@code /health}, which reports the engine as unavailable until the
+     * warm settles — accurate, and what the smoke test waits for.</p>
      *
      * <p>Idempotent, and safe to call from anywhere, including before the
      * context exists: {@link PadLivenessApplication} calls it first thing so the
@@ -101,15 +107,16 @@ public class AppConfig {
             if (openCvWarmupThread != null) {
                 return;
             }
-            Thread warmup = new Thread(() -> {
-                // Deliberately does NOT log. Logback drops events emitted before
-                // Spring Boot initialises its logging system, and this thread
-                // starts before SpringApplication.run(), so a message logged here
-                // would simply vanish from the packaged app's output. The
-                // outcome is reported once, from ensureOpenCvLoaded()'s caller,
-                // where the logging context is live.
-                loadOpenCvOnce();
-            }, "opencv-warmup");
+            // This thread deliberately never logs. Logback drops events
+            // emitted before Spring Boot initialises its logging system, and
+            // this thread starts before SpringApplication.run() — on a warm
+            // cache the load can settle inside the JVM's own fat-jar
+            // class-loading time, before run() even begins, so an outcome
+            // line logged here would vanish from packaged builds. The
+            // outcome is therefore reported from the main thread instead:
+            // by {@link #init()} once beans are being configured, or by
+            // {@link #ensureOpenCvLoaded()} on the first frame.
+            Thread warmup = new Thread(() -> loadOpenCvOnce(), "opencv-warmup");
             // Daemon: a slow or stuck extraction must never hold up JVM exit.
             warmup.setDaemon(true);
             openCvWarmupThread = warmup;
@@ -117,13 +124,53 @@ public class AppConfig {
         }
     }
 
+    /**
+     * Never blocks on OpenCV. Boot pays nothing for the native library:
+     * the warm-up thread settles the load in the background and the first
+     * frame submission triggers it if that has not happened yet.
+     */
     @PostConstruct
     void init() {
         warmOpenCvAsync();
-        // Returns instantly when the warm already settled the load, and blocks
-        // otherwise. Either way this call is what emits the outcome log line,
-        // from a thread whose logging is configured.
-        ensureOpenCvLoaded();
+        reportOutcomeWhenSettled();
+    }
+
+    /**
+     * Reports the warm-up outcome from the main thread, the earliest
+     * point at which logging is guaranteed to be live: Spring Boot has
+     * attached logback's appenders by the time it configures beans,
+     * whereas anything emitted from the warm-up thread can land before
+     * that and be silently dropped (verified: the same {@code log.info}
+     * survives from {@code init()} onwards but vanishes from the warm-up
+     * thread before it).
+     *
+     * <p>When the load has already settled — the common case, since a
+     * warm-cache load finishes inside the JVM's own class-loading time
+     * — the outcome line is emitted right here. When it has not, a
+     * short-lived daemon joins the warm-up thread and reports the moment
+     * it settles, so the line still appears in the boot log without
+     * making any boot step wait for it.</p>
+     */
+    private static void reportOutcomeWhenSettled() {
+        if (reportOpenCvOutcomeOnce()) {
+            return;
+        }
+        Thread warmup = openCvWarmupThread;
+        if (warmup == null) {
+            return;
+        }
+        Thread reporter = new Thread(() -> {
+            try {
+                warmup.join();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            reportOpenCvOutcomeOnce();
+        }, "opencv-outcome");
+        // Daemon: a stuck extraction must never hold up JVM exit.
+        reporter.setDaemon(true);
+        reporter.start();
     }
 
     /**
@@ -132,16 +179,17 @@ public class AppConfig {
      *
      * <p>Safe to call concurrently from several threads: whoever gets there
      * first performs the load while the rest block on the monitor, so this is
-     * both the "warm" entry point and the synchronous barrier that callers
-     * depend on.
+     * the synchronous barrier the first consumer waits on — the warm-up thread
+     * calls {@link #loadOpenCvOnce()} directly, everything else goes through
+     * here.</p>
      *
-     * <p>Bean instantiation order is not guaranteed, so a bean created before
-     * this configuration class (e.g. {@code PassiveScoringService}, which
-     * builds a Haar cascade while initializing the liveness model) would
-     * otherwise hit an {@code UnsatisfiedLinkError} on
-     * {@code CascadeClassifier_1(String)} and silently degrade. Asking here
-     * makes the load idempotent: the first caller performs it, everyone else
-     * gets the flag.</p>
+     * <p>This is the lazy trigger (first frame submission, first score): no
+     * bean's creation depends on it, so bean instantiation order is irrelevant.
+     * The first caller that genuinely needs the library — the frame pipeline,
+     * {@code PassiveScoringService} resolving its scorer — performs the load,
+     * everyone else gets the flag. Without the guard, that first caller could
+     * race an in-flight warm-up and hit an {@code UnsatisfiedLinkError} on
+     * {@code CascadeClassifier_1(String)} and silently degrade.</p>
      *
      * <p>openpnp extracts the native binary into a per-JVM temp directory and
      * deletes stale directories on startup; that extraction can transiently
@@ -185,15 +233,24 @@ public class AppConfig {
     }
 
     /**
-     * Emits the load outcome exactly once, on whichever thread first calls
-     * {@link #ensureOpenCvLoaded()} after the attempt has settled — in the app
-     * that is always a Spring-managed thread with logging initialised, so the
-     * line cannot be swallowed by the pre-boot logging gap.
+     * Emits the load outcome exactly once, from a caller whose logging
+     * is live ({@link #reportOutcomeWhenSettled()} on the main thread,
+     * or {@link #ensureOpenCvLoaded()} on the first frame).
+     *
+     * <p>Returns {@code false} without consuming the one-shot flag when
+     * the load attempt has not settled: the outcome is not knowable yet,
+     * and claiming failure here would log a spurious warning and then
+     * suppress the real outcome line when the attempt finally settles.
+     * The {@code init()} caller relies on that to defer to the
+     * join-watcher instead.</p>
+     *
+     * @return true when an outcome was emitted, false when the attempt
+     *         is still in flight (or the outcome was already reported)
      */
-    private static void reportOpenCvOutcomeOnce() {
+    private static boolean reportOpenCvOutcomeOnce() {
         synchronized (OPEN_CV_LOCK) {
-            if (openCvOutcomeReported) {
-                return;
+            if (openCvOutcomeReported || !openCvAttempted) {
+                return false;
             }
             openCvOutcomeReported = true;
         }
@@ -203,6 +260,7 @@ public class AppConfig {
             log.warn("OpenCV native library could not be loaded; frame-processing "
                     + "endpoints will return 503 until it is available", openCvFailure);
         }
+        return true;
     }
 
     /** True when the OpenCV native library loaded and frame processing is usable. */
