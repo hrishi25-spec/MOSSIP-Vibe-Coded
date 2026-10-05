@@ -9,6 +9,11 @@ on:
     # additionally publish a GitHub Release with the jar attached.
     branches: ['**']
     tags: ['v*']
+  # Branches get the identical gate before merging — unit + integration
+  # suites, the PostgreSQL schema gate, the console DOM tests and both jar
+  # builds. A pull request publishes nothing: the upload step below is guarded
+  # on event type, ref and default branch, so no fork can write to storage.
+  pull_request:
 
 # Least privilege by default: the workflow only needs to read the repo. The
 # release job overrides this with contents: write, scoped to that one job.
@@ -68,19 +73,42 @@ jobs:
       - name: Run the console guard tests
         run: node src/test/js/console-guards.test.mjs
 
-  # Packages the Spring Boot executable jar, but only after BOTH test jobs
-  # passed (needs: test waits for every matrix leg), so a red build never
-  # publishes an artifact.
+  # Packages the executable jars, but only after the suites passed (needs: test
+  # waits for every matrix leg, and console waits for the DOM guards), so a red
+  # build never publishes an artifact.
   #
-  # Skipped on tag pushes: the release job below builds and smoke tests its own
-  # jar (jobs get separate runners and no shared filesystem, so it could not
-  # reuse this one), and running both would package twice for nothing.
+  # Two legs, in parallel. The full jar is the deployable artifact — natives
+  # for every platform. The slim jar is the same application with only the
+  # linux-x86_64 natives a Linux runner can load anyway, which is why it is a
+  # fraction of the payload. Building both means storage holds the small one
+  # without anyone losing the fully runnable build.
+  #
+  # Runs on tag pushes too, not only branch pushes: the upload below is what
+  # gives a release tag a versioned artifact independent of whichever branch
+  # happens to be the default. The release job further down separately attaches
+  # the full jar to the GitHub Release.
   package:
-    name: Package executable jar
+    name: Package ${{ matrix.artifact }} jar
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: test
-    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    timeout-minutes: 25
+    needs: [test, console]
+    strategy:
+      # Both legs run to completion — one packaging path failing must not hide
+      # the other's result.
+      fail-fast: false
+      matrix:
+        include:
+          - artifact: full
+            profile: ''
+            jar: target/pad-liveness-backend-*.jar
+            artifact_name: pad-liveness-backend-jar
+          # `clean` is not optional for this leg: the slim profile unpacks the
+          # kept natives into target/classes, which repackage embeds verbatim,
+          # so a non-clean build could leave linux-only natives in the full jar.
+          - artifact: slim
+            profile: '-Pslim'
+            jar: target/pad-liveness-backend-*-slim.jar
+            artifact_name: pad-liveness-backend-slim-jar
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -94,14 +122,21 @@ jobs:
 
       # Tests already ran in the test jobs, so skip them here; spring-boot
       # repackage turns the build output into the runnable fat jar.
-      - name: Package
-        run: ./mvnw --batch-mode -DskipTests package
+      - name: Package the ${{ matrix.artifact }} jar
+        run: ./mvnw --batch-mode clean package -DskipTests ${{ matrix.profile }}
 
       # Boot the jar we just built and prove it serves traffic. The test jobs
       # run against target/classes with the full ~/.m2 classpath, so nothing
       # they do can catch a packaging-only regression — a fat jar that lost its
-      # OpenCV natives, a wrong Start-Class, a truncated repackage all ship
-      # green and only break for whoever runs the artifact.
+      # OpenCV natives, a wrong Start-Class (spring-boot writes JarLauncher
+      # itself when a <classifier> is set, and the loader then re-launches until
+      # StackOverflowError), a truncated repackage all ship green and only break
+      # for whoever runs the artifact.
+      #
+      # Only the full leg here: smoke-jar.sh boots the non-slim jar by name, and
+      # that is the artifact people deploy. The slim leg is build-and-upload
+      # for now — it does boot and report the engine available on linux-x86_64
+      # (verified locally), it just does not have its own smoke step yet.
       #
       # Deliberately not branch-gated (unlike the upload below): this is the
       # check that makes gating the upload safe to begin with.
@@ -109,25 +144,27 @@ jobs:
       # Lives in a script, not inline, because the release job runs it too and
       # it is runnable locally with ./scripts/smoke-jar.sh.
       - name: Smoke test the packaged jar
+        if: matrix.artifact == 'full'
         run: ./scripts/smoke-jar.sh
 
-      # The glob matches exactly one file — the executable fat jar
-      # (the classifier-less repackaged artifact; *.jar.original excluded).
-      # The jar is ~200 MB (bundled OpenCV natives + ONNX model), so retention
-      # is kept short to stay inside the artifact storage quota.
+      # Publishes on the default branch and on v* tags: a versioned artifact
+      # must not depend on which branch is the default. Pull requests build
+      # both jars but never write to the repo's artifact storage.
       #
-      # Only the default branch publishes. Every feature-branch push still
-      # builds the jar (that is the packaging check), but uploading from all
-      # of them would spend the repo-wide artifact quota on commits nobody
-      # downloads. The ref is compared against the repository's own default
-      # branch, so it keeps working if the default branch is ever renamed
-      # instead of hardcoding "main" here.
+      # Two artifact names rather than one shared name: upload-artifact v4
+      # treats a name as immutable across jobs, so a second matrix leg
+      # uploading under the same name fails with 409 and takes the whole job
+      # with it. Each glob matches exactly one file for its leg — the
+      # classifier-less fat jar, and the -slim classifier respectively.
+      #
+      # They are ~210 MB and ~94 MB (bundled OpenCV natives + ONNX model), so
+      # retention is kept short to stay inside the artifact storage quota.
       - name: Upload jar
-        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        if: github.event_name != 'pull_request' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/v'))
         uses: actions/upload-artifact@v4
         with:
-          name: pad-liveness-backend-jar
-          path: target/pad-liveness-backend-*.jar
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.jar }}
           if-no-files-found: error
           retention-days: 7
 
