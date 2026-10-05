@@ -303,6 +303,11 @@ jobs:
   # most deployments actually run — at a fifth of the size it is what most
   # downloaders want. Each ships with a sibling .sha256 so a download can be
   # verified before it is trusted.
+  #
+  # A `-canary` tag (e.g. v1.1.0-canary.1) runs the identical pipeline —
+  # both jars, both boots, checksums — but publishes as a prerelease, so a
+  # canary is visible and installable without ever being the version GitHub
+  # surfaces as "the latest". The pattern is matched on the tag name below.
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
@@ -436,6 +441,12 @@ jobs:
       # re-pushed or moved tag looks like. Upload --clobber replaces the assets
       # in that case, so a retried run converges instead of wedging. GH_TOKEN is
       # the automatic per-run token, so there is no secret to configure or leak.
+      #
+      # A `-canary` tag publishes as a prerelease: same smoke gate, same assets,
+      # but flagged so nobody treats an untested-in-production build as the
+      # latest stable version. The flag is set at create time; gh has no option
+      # to flip it on upload, so an existing canary release keeps whatever flag
+      # it was created with — a re-run replaces the assets, which is the point.
       - name: Attach assets to release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -459,6 +470,15 @@ jobs:
             fi
           done
 
+          # Canary pattern: any tag carrying a -canary segment (v1.1.0-canary,
+          # v1.1.0-canary.1, ...). Stable tags match nothing and publish
+          # normally.
+          PRERELEASE=()
+          if [[ "$TAG" == *-canary* ]]; then
+            echo "canary tag $TAG — publishing as a prerelease"
+            PRERELEASE=(--prerelease)
+          fi
+
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "release $TAG exists — replacing the assets"
             gh release upload "$TAG" "${ASSETS[@]}" --clobber
@@ -469,5 +489,6 @@ jobs:
             # one exists and starts from scratch when it does not.
             gh release create "$TAG" "${ASSETS[@]}" \
               --title "$TAG" \
-              --generate-notes
+              --generate-notes \
+              "${PRERELEASE[@]}"
           fi
