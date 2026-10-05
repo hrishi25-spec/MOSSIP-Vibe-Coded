@@ -300,6 +300,14 @@ All notable changes to this project will be documented in this file.
   409 when the failed challenge is re-validated
 
 ### Changed
+- The console's **Policy change history** now loads with the page instead of
+  only after clicking refresh, so the most recent edit — its key fingerprint,
+  risk level and field diff — is on screen when the console opens. Previously
+  the fingerprint and the risk badge were rendered but hidden behind a click,
+  which meant the panel an operator was meant to check before saving was the
+  one they had not yet loaded. The load is the same open `GET` as the policy
+  read (no admin key needed) and a failure only writes the status line, so a
+  history outage cannot block editing.
 - **Release assets carry the tag version.** `v1.0.1` now builds as
   `1.0.1` — the pom switched to Maven's CI-friendly `${revision}`
   property (default `1.0.0-SNAPSHOT`, so every other build keeps its
