@@ -6,7 +6,8 @@ name: CI
 on:
   push:
     # Every branch push runs the suites and builds the jar. Tag pushes (v*)
-    # additionally publish a GitHub Release with the jar attached.
+    # additionally publish a GitHub Release with both jars and their
+    # checksums attached.
     branches: ['**']
     tags: ['v*']
   # Branches get the identical gate before merging — unit + integration
@@ -85,8 +86,9 @@ jobs:
   #
   # Runs on tag pushes too, not only branch pushes: the upload below is what
   # gives a release tag a versioned artifact independent of whichever branch
-  # happens to be the default. The release job further down separately attaches
-  # the full jar to the GitHub Release.
+  # happens to be the default. The release job further down builds both jars
+  # itself (stamped with the tag's version) and attaches them, with checksums,
+  # to the GitHub Release.
   package:
     name: Package ${{ matrix.artifact }} jar
     runs-on: ubuntu-latest
@@ -292,13 +294,20 @@ jobs:
       - name: Validate migrations against the entities
         run: ./mvnw --batch-mode test -Dtest='PostgresSchemaTest'
 
-  # Pushing a version tag (v*) publishes the jar to a GitHub Release. This is
+  # Pushing a version tag (v*) publishes a GitHub Release. This is
   # the deliberate, human-initiated publish event — unlike the per-push artifact
   # upload, which is ephemeral and branch-gated.
+  #
+  # BOTH jars are release assets: the full one is the deployable
+  # cross-platform build, and the slim one is what CI, the Docker image and
+  # most deployments actually run — at a fifth of the size it is what most
+  # downloaders want. Each ships with a sibling .sha256 so a download can be
+  # verified before it is trusted.
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Two full builds plus two boots, so double the package job's budget.
+    timeout-minutes: 30
     needs: test
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     # Scoped to this job alone: the rest of the workflow stays read-only.
@@ -325,7 +334,11 @@ jobs:
       # the snapshot default. The assertions below exist because a failed
       # stamp is otherwise silent: the build still succeeds and publishes
       # a SNAPSHOT-named asset.
-      - name: Package (version stamped from the tag)
+      #
+      # Both jars are built here rather than downloaded from the package job:
+      # those were built without the tag's revision, and a release must not
+      # ship assets whose name and manifest carry a snapshot version.
+      - name: Package the full jar (version stamped from the tag)
         env:
           TAG: ${{ github.ref_name }}
         run: |
@@ -346,43 +359,115 @@ jobs:
           fi
           echo "stamped $TAG as $VERSION (manifest Implementation-Version: $MANIFEST_VERSION)"
 
-      - name: Smoke test the packaged jar
-        run: ./scripts/smoke-jar.sh
+      # The boot gate, before anything is published. On success the jar is
+      # staged into release-assets/ — the slim build below starts with
+      # `clean`, which deletes everything in target/ including this jar.
+      - name: Smoke test the full jar
+        env:
+          SMOKE_JAR: full
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -uo pipefail
+          ./scripts/smoke-jar.sh
+          VERSION="${TAG#v}"
+          mkdir -p release-assets
+          mv "target/pad-liveness-backend-$VERSION.jar" release-assets/
+          echo "staged release-assets/pad-liveness-backend-$VERSION.jar"
+
+      # Same gate for the slim asset. `clean` is not optional for this build:
+      # the slim profile unpacks the kept natives into target/classes, which
+      # repackage embeds verbatim, so a target/ left over from the full build
+      # could leak the wrong natives into the slim artifact (see pom.xml).
+      - name: Package the slim jar (version stamped from the tag)
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -uo pipefail
+          VERSION="${TAG#v}"
+          ./mvnw --batch-mode -DskipTests -Drevision="$VERSION" clean package -Pslim
+
+          JAR="target/pad-liveness-backend-$VERSION-slim.jar"
+          if [ ! -f "$JAR" ]; then
+            echo "::error::expected $JAR — the tag version was not stamped into the slim build"
+            exit 1
+          fi
+          MANIFEST_VERSION=$(unzip -p "$JAR" META-INF/MANIFEST.MF \
+            | sed -n 's/^Implementation-Version: //p' | tr -d '\r')
+          if [ "$MANIFEST_VERSION" != "$VERSION" ]; then
+            echo "::error::slim jar manifest reports '$MANIFEST_VERSION', expected '$VERSION'"
+            exit 1
+          fi
+          echo "stamped $TAG as $VERSION (slim manifest Implementation-Version: $MANIFEST_VERSION)"
+
+      - name: Smoke test the slim jar
+        env:
+          SMOKE_JAR: slim
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -uo pipefail
+          ./scripts/smoke-jar.sh
+          VERSION="${TAG#v}"
+          mkdir -p release-assets
+          mv "target/pad-liveness-backend-$VERSION-slim.jar" release-assets/
+          echo "staged release-assets/pad-liveness-backend-$VERSION-slim.jar"
+
+      # One checksum per jar, named exactly like its jar with a .sha256
+      # suffix — the convention `sha256sum -c <file>.sha256` verifies from
+      # the download directory with no path editing. The check run here
+      # proves the files are well-formed before they are published.
+      - name: Generate checksums for the release assets
+        run: |
+          set -uo pipefail
+          cd release-assets
+          shopt -s nullglob
+          JARS=( pad-liveness-backend-*.jar )
+          shopt -u nullglob
+          if [ "${#JARS[@]}" -ne 2 ]; then
+            echo "::error::expected the full and slim jars in release-assets/, found ${#JARS[@]}"
+            ls -la
+            exit 1
+          fi
+          for jar in "${JARS[@]}"; do
+            sha256sum "$jar" > "$jar.sha256"
+            sha256sum -c "$jar.sha256"
+          done
 
       # `gh release create` fails if the release already exists, which is what a
-      # re-pushed or moved tag looks like. Upload --clobber replaces the asset
+      # re-pushed or moved tag looks like. Upload --clobber replaces the assets
       # in that case, so a retried run converges instead of wedging. GH_TOKEN is
       # the automatic per-run token, so there is no secret to configure or leak.
-      - name: Attach jar to release
+      - name: Attach assets to release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
           set -uo pipefail
-          # Globs, not `ls | grep`: nullglob turns "nothing matched" into
-          # an empty array, so a missing jar reports itself instead of
-          # handing gh an empty argument.
-          shopt -s nullglob
-          JARS=( target/pad-liveness-backend-*.jar )
-          shopt -u nullglob
-          JAR=""
-          for jar in "${JARS[@]}"; do
-            case "$jar" in *-slim.jar) ;; *) JAR="$jar" ;; esac
+          VERSION="${TAG#v}"
+          ASSETS=(
+            "release-assets/pad-liveness-backend-$VERSION.jar"
+            "release-assets/pad-liveness-backend-$VERSION.jar.sha256"
+            "release-assets/pad-liveness-backend-$VERSION-slim.jar"
+            "release-assets/pad-liveness-backend-$VERSION-slim.jar.sha256"
+          )
+          # All four must exist: gh skips a missing file without failing, which
+          # would publish a release with no slim jar and nobody would notice
+          # until someone went looking for it.
+          for asset in "${ASSETS[@]}"; do
+            if [ ! -f "$asset" ]; then
+              echo "::error::missing release asset: $asset"
+              exit 1
+            fi
           done
-          if [ -z "$JAR" ]; then
-            echo "::error::no full (non-slim) jar in target/ — package it first"
-            exit 1
-          fi
 
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "release $TAG exists — replacing the asset"
-            gh release upload "$TAG" "$JAR" --clobber
+            echo "release $TAG exists — replacing the assets"
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
           else
             # No --notes-start-tag: it errors when there is no previous release,
             # which would make the very first tag unpublishable. Plain
             # --generate-notes picks the previous release automatically when
             # one exists and starts from scratch when it does not.
-            gh release create "$TAG" "$JAR" \
+            gh release create "$TAG" "${ASSETS[@]}" \
               --title "$TAG" \
               --generate-notes
           fi
