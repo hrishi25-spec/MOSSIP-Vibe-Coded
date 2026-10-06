@@ -323,6 +323,55 @@
     } catch (e) { log("audit error: " + e.message); }
   }
   $("btn-metrics").addEventListener("click", refreshMetrics);
+
+  // ---------- diagnostics (opt-in, local only) ----------
+  // The section stays hidden until GET /api/v1/diagnostics answers 200 — the
+  // service has diagnostic mode enabled AND this page is a loopback client.
+  // Disabled and remote get the identical 404 server-side, so a probe never
+  // announces a mode that is not on. Polling runs only while the panel is up.
+  let diagTimer = null;
+  function hideDiagnostics() {
+    $("diag-section").hidden = true;
+    if (diagTimer) { clearInterval(diagTimer); diagTimer = null; }
+  }
+  function diagNum(v, suffix) {
+    if (v === null || v === undefined) return "—";
+    return Number(v).toFixed(1) + (suffix || "");
+  }
+  async function refreshDiagnostics() {
+    try {
+      const res = await fetch("/api/v1/diagnostics", { cache: "no-store" });
+      if (!res.ok) { hideDiagnostics(); return false; }
+      const d = await res.json();
+      if (!d.enabled) { hideDiagnostics(); return false; }
+      $("diag-section").hidden = false;
+      kv($("diag"), {
+        scorer: d.scorer || "not resolved yet",   // delegate used (spec §10)
+        fps: diagNum(d.fps),
+        frames: d.frameCount,
+        lastScore: fmt(d.lastScore),
+        medianScore: fmt(d.medianScore),
+        avgFrameMs: diagNum(d.avgFrameMs, " ms"),
+        maxFrameMs: diagNum(d.maxFrameMs, " ms"),
+        capturedAt: d.capturedAt
+      });
+      const rows = d.recentFrames || [];
+      const pre = $("diag-frames");
+      pre.textContent = rows.length
+        ? rows.map(f => `${f.at}  score=${fmt(f.score)}  quality=${fmt(f.faceQuality)}  `
+            + `${f.frameMs} ms  pad=${f.padFlag}  ${f.action}`).join("\n")
+        : "No frames recorded yet.";
+      pre.scrollTop = pre.scrollHeight;
+      return true;
+    } catch {
+      hideDiagnostics();
+      return false;
+    }
+  }
+  $("btn-diag").addEventListener("click", refreshDiagnostics);
+  refreshDiagnostics().then(ok => {
+    if (ok && !diagTimer) diagTimer = setInterval(refreshDiagnostics, 2000);
+  });
   $("btn-audit").addEventListener("click", refreshAudit);
   $("btn-close").addEventListener("click", async () => {
     if (!sessionId) { log("No session to close."); return; }

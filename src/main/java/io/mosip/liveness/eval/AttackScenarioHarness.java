@@ -262,7 +262,11 @@ public final class AttackScenarioHarness {
 
     // ---- aggregation ----
 
-    /** Computes the ISO/IEC 30107-3 style report from raw results. */
+    /**
+     * Computes the ISO/IEC 30107-3 style report from raw results — aggregate
+     * APCER/BPCER/ACER plus the per-PAI-species APCER breakdown
+     * ({@link ScenarioReport#apcerBySpecies()}).
+     */
     public static ScenarioReport report(List<PresentationResult> results) {
         Map<PresentationLabel, Integer> totals = new EnumMap<>(PresentationLabel.class);
         Map<PresentationLabel, Integer> accepted = new EnumMap<>(PresentationLabel.class);
@@ -281,10 +285,26 @@ public final class AttackScenarioHarness {
         int bonaTotal = totals.getOrDefault(PresentationLabel.BONA_FIDE, 0);
         int bonaRejected = bonaTotal - accepted.getOrDefault(PresentationLabel.BONA_FIDE, 0);
 
+        // Per-species rows (ISO/IEC 30107-3 reports APCER per PAI species);
+        // bona fide is excluded — its error rate is BPCER, not an APCER.
+        Map<PresentationLabel, ScenarioReport.SpeciesApcer> bySpecies =
+                new EnumMap<>(PresentationLabel.class);
+        for (PresentationLabel label : PresentationLabel.values()) {
+            if (label == PresentationLabel.BONA_FIDE) {
+                continue;
+            }
+            int speciesTotal = totals.getOrDefault(label, 0);
+            int speciesAccepted = accepted.getOrDefault(label, 0);
+            bySpecies.put(label, new ScenarioReport.SpeciesApcer(
+                    label, speciesTotal, speciesAccepted,
+                    PadMetrics.apcer(speciesAccepted, speciesTotal)));
+        }
+
         double apcer = PadMetrics.apcer(attacksAccepted, attacksTotal);
         double bpcer = PadMetrics.bpcer(bonaRejected, bonaTotal);
         double n = Math.max(1, results.size());
         return new ScenarioReport(apcer, bpcer, PadMetrics.acer(apcer, bpcer),
-                apcer, bpcer, escalations / n, 0 /* latency measured per-presentation upstream */, results.size());
+                apcer, bpcer, escalations / n, 0 /* latency measured per-presentation upstream */,
+                results.size(), bySpecies);
     }
 }

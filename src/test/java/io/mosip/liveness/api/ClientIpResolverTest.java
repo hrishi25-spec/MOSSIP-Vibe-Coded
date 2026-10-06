@@ -9,7 +9,9 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Contract for the shared client-IP resolution, now that two callers depend on
@@ -125,5 +127,46 @@ class ClientIpResolverTest {
         // A bare "clientIp" would collide with anything a container or library
         // parks on the request.
         assertEquals(ClientIpResolver.class.getName() + ".clientIp", ClientIpResolver.ATTRIBUTE);
+    }
+
+    // ------------------------------------------------------------------ locality
+
+    @Test
+    void loopbackIsRecognisedInEveryFormThePeerAddressCanTake() {
+        assertTrue(ClientIpResolver.isLoopback("127.0.0.1"));
+        assertTrue(ClientIpResolver.isLoopback("127.1.2.3"), "all of 127.0.0.0/8 is local");
+        assertTrue(ClientIpResolver.isLoopback("::1"));
+        assertTrue(ClientIpResolver.isLoopback("0:0:0:0:0:0:0:1"));
+        assertTrue(ClientIpResolver.isLoopback("::ffff:127.0.0.1"),
+                "an IPv4-mapped loopback peer is still loopback");
+        assertTrue(ClientIpResolver.isLoopback(" 127.0.0.1 "));
+    }
+
+    @Test
+    void anythingNotLoopbackIsNotLocal() {
+        assertFalse(ClientIpResolver.isLoopback("10.0.0.5"));
+        assertFalse(ClientIpResolver.isLoopback("192.168.1.7"));
+        assertFalse(ClientIpResolver.isLoopback("198.51.100.7"));
+        assertFalse(ClientIpResolver.isLoopback("fe80::1"));
+        assertFalse(ClientIpResolver.isLoopback("127.0.0.256"),
+                "an out-of-range octet is not quietly accepted");
+        assertFalse(ClientIpResolver.isLoopback("evil.example.com"));
+        assertFalse(ClientIpResolver.isLoopback(null));
+        assertFalse(ClientIpResolver.isLoopback(""));
+    }
+
+    @Test
+    void aTrustedProxysForwardedClientIsJudgedAsTheRemoteCallerItIs() {
+        // Diagnostic mode is local-only; if the answer trusted a local proxy's
+        // forwarded header blindly, any remote client could open the panel.
+        // Here the proxy peer itself is the loopback address.
+        ClientIpResolver resolver = resolverTrusting("127.0.0.1");
+        MockHttpServletRequest viaProxy = request("127.0.0.1", "198.51.100.7", null);
+        assertFalse(ClientIpResolver.isLoopback(resolver.resolve(viaProxy)),
+                "a local proxy must not launder a remote caller into loopback");
+
+        MockHttpServletRequest localClient = request("127.0.0.1", "127.0.0.1", null);
+        assertTrue(ClientIpResolver.isLoopback(resolver.resolve(localClient)),
+                "a genuinely local client behind the proxy stays local");
     }
 }

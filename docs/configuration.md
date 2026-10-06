@@ -238,6 +238,7 @@ an active challenge.
 | `model-path` | *(blank)* | Filesystem override for the model; blank uses the bundled `classpath:models/minifasnet_v2.onnx` (SHA-256 `d7b3cd9b…` verified on load). |
 | `passive-threshold` | `0.80` | Mirrors `LivenessConfig.DEFAULT_PASSIVE_THRESHOLD`; the `config_policies` DB row wins at runtime. |
 | `min-face-quality`, `passive-min-frames`, `passive-window-frames`, `min-challenge-count`, `challenge-timeout-ms`, `max-retries` | see yml | Engine defaults for the embedded (library) path. |
+| `diagnostics-enabled` (`LIVENESS_DIAGNOSTICS_ENABLED`) | `false` | **Diagnostic mode (opt-in, local)** — orchestration spec §10. When true, the service retains raw per-frame scores, timings, FPS and the scorer delegate in a bounded ring (**no pixels**) and `GET /api/v1/diagnostics` serves the snapshot to **loopback callers only**; disabled or remote callers get the identical empty 404, so the mode never leaks its own existence. The console's debug panel appears only when both gates pass. |
 
 ---
 

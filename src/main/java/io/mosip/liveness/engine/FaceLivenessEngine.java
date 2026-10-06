@@ -11,6 +11,7 @@ import io.mosip.liveness.config.LivenessConfig;
 import io.mosip.liveness.core.ActiveFrameResult;
 import io.mosip.liveness.core.Challenge;
 import io.mosip.liveness.core.ChallengeProgress;
+import io.mosip.liveness.core.ChallengeType;
 import io.mosip.liveness.core.CombinedLivenessScore;
 import io.mosip.liveness.core.FaceSignals;
 import io.mosip.liveness.core.Frame;
@@ -22,9 +23,11 @@ import io.mosip.liveness.core.WorkflowType;
 
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -319,18 +322,43 @@ public final class FaceLivenessEngine implements LivenessPipeline {
 
     @Override
     public Challenge requestChallenge(String sessionId) {
+        return requestChallenge(sessionId, Set.of());
+    }
+
+    /**
+     * Issue the next engine-selected challenge with the given types excluded
+     * from the draw pool (used by the Android orchestrator to drop BLINK when
+     * the measured stream rate is too low to sample a blink reliably — the
+     * engine stays fps-agnostic and the caller adapts the pool). Exclusion
+     * never yields an empty pool: if every allowed type were excluded, the
+     * unfiltered pool is used — a less-than-ideal challenge beats no
+     * challenge at all.
+     */
+    public Challenge requestChallenge(String sessionId, Set<ChallengeType> excludedTypes) {
         LivenessSession s = requireSession(sessionId);
         assertNotTerminal(s);
         if (s.state() != LivenessSession.State.ESCALATED) {
             throw new LivenessException(LivenessErrorCode.INVALID_STATE,
                     "challenge requested outside escalation state: " + s.state());
         }
-        Challenge challenge = s.selector().next(s.policy().allowedChallenges(), s.challengeAttempts());
+        Set<ChallengeType> pool = s.policy().allowedChallenges();
+        if (excludedTypes != null && !excludedTypes.isEmpty()) {
+            EnumSet<ChallengeType> filtered = EnumSet.noneOf(ChallengeType.class);
+            filtered.addAll(pool);
+            filtered.removeAll(excludedTypes);
+            if (!filtered.isEmpty()) {
+                pool = filtered;
+            }
+        }
+        Challenge challenge = s.selector().next(pool, s.challengeAttempts());
         s.setCurrentChallenge(challenge);
         s.issueChallenge(clock.millis());
         audit.log(AuditEvent.of(clock.millis(), sessionId, s.workflow(), AuditEventType.CHALLENGE_ISSUED)
                 .field("type", challenge.type().name())
                 .field("attempt", s.challengeAttempts())
+                .field("excluded", excludedTypes == null || excludedTypes.isEmpty()
+                        ? "none"
+                        : String.join(",", excludedTypes.stream().map(Enum::name).sorted().toList()))
                 .field("timeoutMs", challenge.timeoutMs()));
         return challenge;
     }

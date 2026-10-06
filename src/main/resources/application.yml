@@ -127,6 +127,13 @@ mosip:
     # raising it only ever makes the flow more patient.
     min-challenge-window-ms: ${MIN_CHALLENGE_WINDOW_MS:15000}
     max-retries: 2
+    # Diagnostic mode (opt-in, local — orchestration spec §10): retains raw
+    # per-frame scores, timings, FPS and the scorer delegate for the local-only
+    # debug panel at GET /api/v1/diagnostics. Off by default. The endpoint
+    # answers only loopback callers, and only while this is true — otherwise
+    # it returns the same 404 a remote caller gets, so the mode never leaks
+    # its own existence. No pixels are ever retained.
+    diagnostics-enabled: ${LIVENESS_DIAGNOSTICS_ENABLED:false}
 
 # ---- Logging ----
 logging:

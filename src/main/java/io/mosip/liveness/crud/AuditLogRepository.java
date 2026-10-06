@@ -40,7 +40,7 @@ public interface AuditLogRepository extends JpaRepository<AuditLog, UUID> {
 
     /**
      * The newest entry that is part of a hash chain, for linking the next one
-     * onto it. Entries written before {@code V6} have no hash and are skipped,
+     * onto it. Entries written before {@code V9} have no hash and are skipped,
      * so the chain continues across the migration boundary instead of
      * restarting on a NULL.
      */

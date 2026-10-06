@@ -41,7 +41,7 @@ import java.util.Optional;
  * at persist time and {@code createdAt} by {@code @PrePersist}, so both must be
  * known up front — {@code createdAt} is set explicitly by the caller for
  * exactly this reason. Recomputing after the insert is not an option: the
- * immutability triggers added in {@code V6} reject the UPDATE.</p>
+ * immutability triggers added in {@code V9} reject the UPDATE.</p>
  *
  * <h2>What this does and does not buy</h2>
  *

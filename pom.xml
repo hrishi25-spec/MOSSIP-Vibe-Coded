@@ -31,6 +31,9 @@
          compatible 1.x line. -->
     <testcontainers.version>1.21.4</testcontainers.version>
     <revision>1.0.0-SNAPSHOT</revision>
+    <!-- Desktop (JavaFX) overlay UI. Provided by the MOSIP Registration Client
+         host at runtime — see the javafx-controls dependency below. -->
+    <javafx.version>17.0.10</javafx.version>
   </properties>
 
   <dependencies>
@@ -115,6 +118,26 @@
     </dependency>
 
     <!-- Lombok (reduce boilerplate) -->
+    <!--
+      Desktop (JavaFX) liveness overlay — LivenessChallengeOverlay.fxml +
+      controller. Scope `provided`: the overlay runs inside the MOSIP
+      Registration Client (a JavaFX application) which supplies the JavaFX
+      runtime; this service never starts a toolkit. Provided keeps JavaFX on
+      the compile/test classpath while staying out of the packaged service.
+    -->
+    <dependency>
+      <groupId>org.openjfx</groupId>
+      <artifactId>javafx-controls</artifactId>
+      <version>${javafx.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.openjfx</groupId>
+      <artifactId>javafx-fxml</artifactId>
+      <version>${javafx.version}</version>
+      <scope>provided</scope>
+    </dependency>
+
     <dependency>
       <groupId>org.projectlombok</groupId>
       <artifactId>lombok</artifactId>
@@ -155,6 +178,25 @@
             <exclude>
               <groupId>org.projectlombok</groupId>
               <artifactId>lombok</artifactId>
+            </exclude>
+            <!-- Provided scope still lands in BOOT-INF/lib — the service
+                 never starts a JavaFX toolkit (the RC host does), so keep
+                 the overlay's compile-time libs out of the runnable jar. -->
+            <exclude>
+              <groupId>org.openjfx</groupId>
+              <artifactId>javafx-base</artifactId>
+            </exclude>
+            <exclude>
+              <groupId>org.openjfx</groupId>
+              <artifactId>javafx-graphics</artifactId>
+            </exclude>
+            <exclude>
+              <groupId>org.openjfx</groupId>
+              <artifactId>javafx-controls</artifactId>
+            </exclude>
+            <exclude>
+              <groupId>org.openjfx</groupId>
+              <artifactId>javafx-fxml</artifactId>
             </exclude>
           </excludes>
         </configuration>
@@ -209,9 +251,9 @@
       `Start-Class: org.springframework.boot.loader.launch.JarLauncher`, so the
       loader launches *itself* and recurses to StackOverflowError before Spring
       starts. Pinning it makes the manifest deterministic.
-    - lombok is restated in <excludes> because Maven merges profile plugin
-      configuration positionally onto the base list; restating all three makes
-      the result independent of merge order.
+    - lombok and the JavaFX set are restated in <excludes> because Maven merges
+      profile plugin configuration positionally onto the base list; restating
+      every base exclude makes the result independent of merge order.
     - The classifier is what stops this from being mistaken for the real
       artifact: the repackaged jar is `-slim.jar`, the plain jar is left beside
       it. It also means two jars match the
@@ -279,6 +321,22 @@
                 <exclude>
                   <groupId>org.projectlombok</groupId>
                   <artifactId>lombok</artifactId>
+                </exclude>
+                <exclude>
+                  <groupId>org.openjfx</groupId>
+                  <artifactId>javafx-base</artifactId>
+                </exclude>
+                <exclude>
+                  <groupId>org.openjfx</groupId>
+                  <artifactId>javafx-graphics</artifactId>
+                </exclude>
+                <exclude>
+                  <groupId>org.openjfx</groupId>
+                  <artifactId>javafx-controls</artifactId>
+                </exclude>
+                <exclude>
+                  <groupId>org.openjfx</groupId>
+                  <artifactId>javafx-fxml</artifactId>
                 </exclude>
                 <exclude>
                   <groupId>org.openpnp</groupId>

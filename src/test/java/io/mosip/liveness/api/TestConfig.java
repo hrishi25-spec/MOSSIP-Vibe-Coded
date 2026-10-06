@@ -8,6 +8,7 @@ import io.mosip.liveness.crud.FrameEventRepository;
 import io.mosip.liveness.crud.LivenessSessionRepository;
 import io.mosip.liveness.config.EffectivePolicyValidator;
 import io.mosip.liveness.config.LivenessConfig;
+import io.mosip.liveness.diagnostics.DiagnosticsService;
 import io.mosip.liveness.services.ChallengeSelectorService;
 import io.mosip.liveness.services.DecisionEngineService;
 import io.mosip.liveness.services.ImageUtils;
@@ -77,6 +78,16 @@ public class TestConfig {
     @Bean @Primary
     public DecisionEngineService decisionEngine() {
         return Mockito.mock(DecisionEngineService.class);
+    }
+
+    /**
+     * Diagnostic mode collector — mocked like the services, so a slice that
+     * posts frames records nothing and {@code recordFrame} stays a no-op
+     * (the mock's default), matching production's fail-closed flag.
+     */
+    @Bean @Primary
+    public DiagnosticsService diagnosticsService() {
+        return Mockito.mock(DiagnosticsService.class);
     }
 
     @Bean @Primary

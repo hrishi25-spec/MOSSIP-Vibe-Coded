@@ -226,32 +226,51 @@ if (livenessConfig.isLivenessEnabled("OPERATOR")) {
 return authService.authValidator(biometrics);
 ```
 
-### 3.6 New JavaFX FXML Files
+### 3.6 Liveness Challenge Overlay (shipped with this repo)
 
-**`LivenessChallengeOverlay.fxml`:**
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<?import javafx.scene.layout.StackPane?>
-<?import javafx.scene.control.Label?>
-<?import javafx.scene.control.ProgressIndicator?>
-<?import javafx.scene.effect.DropShadow?>
+The overlay is a complete implementation of `docs/ui-ux-design.md` — there is
+no stub left to copy:
 
-<StackPane fx:id="challengeOverlay" styleClass="liveness-overlay"
-           visible="false" managed="false">
-    <StackPane alignment="CENTER" styleClass="challenge-card">
-        < DropShadow/>
-        <Label fx:id="challengePrompt" styleClass="challenge-prompt"
-               text="Please blink" wrapText="true"/>
-        <ProgressIndicator fx:id="challengeProgress" maxWidth="60" maxHeight="60"/>
-        <Label fx:id="challengeStatus" styleClass="challenge-status"
-               text="Action detected" visible="false"/>
-    </StackPane>
-</StackPane>
+| Piece | Path |
+|---|---|
+| FXML: preview slot, oval guide, status/challenge/failure cards, Retry/Cancel | `src/main/resources/fxml/LivenessChallengeOverlay.fxml` |
+| Stylesheet (cards, oval + PASSED accent, actions) | `src/main/resources/fxml/liveness-overlay.css` |
+| Overlay component (`StackPane` + `@FXML` controller) | `src/main/java/io/mosip/liveness/client/LivenessChallengeOverlay.java` |
+| State→view mapping + i18n message catalogue | `src/main/java/io/mosip/liveness/client/LivenessOverlayPresenter.java` |
+
+Wiring (on the JavaFX Application Thread, over the capture screen):
+
+```java
+LivenessChallengeOverlay overlay = new LivenessChallengeOverlay();
+captureStack.getChildren().add(overlay);   // full-size; unmanaged while hidden
+
+// One state machine drives the surface (design §6): feed it orchestrator events.
+orchestrator.setListener(overlay.asListener());  // onState → applyState, onFinal → applyFinal
+
+overlay.setOnRetry(orchestrator::startFreshAttempt); // Retry only appears where design §4 allows
+overlay.setOnCancel(orchestrator::cancel);           // cancel → applyFinal(ABORTED)
+overlay.setPreviewImage(webcamFrame);                // host-supplied JavaFX Image (ImageView path)
 ```
+
+Messages resolve through i18n keys: `LivenessOverlayPresenter.DEFAULT_MESSAGES`
+mirrors the Flutter `LivenessView.defaultMessages` catalogue string-for-string
+(a test parses the Dart source so the two cannot drift), and deployments swap
+in their own with `overlay.setMessageLookup(...)`. The FXML deliberately
+carries no `fx:controller`: the overlay loads itself as both root and
+controller (`FXMLLoader.setRoot(this)` + `setController(this)`). JavaFX is a
+`provided` dependency and is excluded from the service jar — the overlay runs
+inside the Registration Client host, never in the backend.
 
 ---
 
 ## 4. Android (Flutter) Integration
+
+> **Orchestrator layer.** The on-device liveness gate (state machine,
+> per-role policy + security floor, challenge selection, signed evidence,
+> gate-validity binding) now lives in `io.mosip.liveness.android` — see
+> `android_client/README.md` for the Pigeon/Flutter/Android-embedding
+> integration tree. The REST sequence below remains valid for the
+> service-mediated (Option B) integration model.
 
 ### 4.1 Add dependency to `clientmanager/build.gradle`
 

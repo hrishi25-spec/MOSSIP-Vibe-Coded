@@ -78,6 +78,23 @@
       </div>
     </section>
 
+    <section class="mt16" id="diag-section" hidden>
+      <h2>Diagnostics — raw scores</h2>
+      <div class="body">
+        <dl class="kv" id="diag"><dt>—</dt><dd>—</dd></dl>
+        <pre id="diag-frames">No frames recorded yet.</pre>
+        <div class="row mt12"><button id="btn-diag">Refresh diagnostics</button></div>
+        <p class="hint">
+          Diagnostic mode is <b>opt-in</b> (<code>mosip.liveness.diagnostics-enabled</code>,
+          off by default) and <b>local only</b>: <code>GET /api/v1/diagnostics</code>
+          answers loopback callers while enabled and the same 404 otherwise, so this
+          section appears only when both hold. It shows raw per-frame scores, timings,
+          FPS and the scorer delegate for troubleshooting (orchestration spec §10) —
+          <b>no pixels</b> are ever retained, and responses are <code>no-store</code>.
+        </p>
+      </div>
+    </section>
+
     <section class="mt16">
       <h2>Request budget</h2>
       <div class="body">

@@ -2,7 +2,294 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased] - 2026-10-05
+## [Unreleased] - 2026-10-06
+
+### Added — Config-key reference gate (`mosip.liveness.*`)
+
+- `FlywayMigrationReferenceTest` gains a third rule: the build fails when any
+  owned file — doc, comment, code string or annotation — cites a
+  `mosip.liveness.*` config key that `application.yml` does not declare and
+  no config class declares with `@Value`. The key set is parsed from
+  application.yml at test time (SnakeYAML), so renaming or removing a key
+  turns the gate red wherever the old name is still cited, and adding one
+  needs no gate edit. A service's own `@Value` counts as a citation rather
+  than a definition, which keeps every backend key declared in
+  application.yml or a config class.
+- The `mosip.liveness.android.*` build-flag namespace is discovered from its
+  declaration site instead: quoted key constants in the Android gate-policy
+  package. Worth knowing: `mosip.liveness.android.allow-disable` is declared
+  (`LivenessGatePolicy.BUILD_FLAG_ALLOW_DISABLE`) and cited by
+  `docs/resource-compliance.md`, but nothing in this repository reads it and
+  `android_client/` never references it — the gate verifies declarations,
+  not consumption.
+- Self-validated in-file with a concatenated dangling key, and red-proved end
+  to end: a planted undefined-key citation turns the scan red with the
+  offending line and the full defined-key list; removal turns it green again.
+  Gate: 4 tests, 0 failures.
+
+### Added — Spec-reference gate: checked-in specs + §-anchor rule
+
+- `docs/references/` now carries the two liveness specs the repository cites —
+  `orchestration.auth` (state machine, sequence diagrams, adapter contracts)
+  and `analyse.md` (requirements analysis) — so section citations resolve
+  against a checked-in source of truth instead of a document nobody has.
+- `FlywayMigrationReferenceTest` gains a third rule beside the migration ones:
+  every cited spec section anchor must match a heading of the checked-in
+  specs. File-qualified citations (`orchestration.auth §5.2`,
+  `analyse.md §5.4`) are validated against that spec's own heading set,
+  extracted from the file at test time; bare anchors (`spec §4`, and every
+  `§N` in `android_client/*.md` markdown) are validated against the union of
+  both specs. Doc-internal anchors — citations of this repository's own
+  design, guide and resource-compliance documents — are deliberately out of
+  scope. The rule is self-validated in-file with concatenated dangling tokens
+  and was red-proved end to end: a planted dangling citation turns the scan
+  red with the offending line and the known heading list, removing it turns
+  the gate green again.
+
+### Added — Backend interoperability report (mock / ONNX / MediaPipe)
+
+- `docs/backend-interoperability-report.md` — formal comparison of the three
+  `LivenessBackend` implementations across the full test suite (measured
+  baseline: 439 tests, 0 failures, exit 0): SPI profiles, an observed
+  conformance matrix, per-backend suite attribution, six findings (uniform
+  fail-closed init mapping to `DEVICE_CONNECTION_FAILURE`; the engine's
+  face-count gate absorbing backend convention drift; PAD fidelity *not*
+  interchangeable though the seam is; the two wiring paths that must stay
+  aligned) and honest limitations.
+- New `LivenessBackendInteroperabilityTest` (12 tests) executes one identical
+  parameterized contract against all three backends: audit-safe stable and
+  distinct ids (pinned to the report's verbatim values), clean-start-or-coded-
+  refusal initialization, the full SPI conversation (scores and PAD confidence
+  in `[0,1]`, no fabricated attacks on no-face frames, idempotent shutdown),
+  and the engine's accept-iff-available constructor contract — MediaPipe's
+  missing-TFLite refusal lands on `DEVICE_CONNECTION_FAILURE` like any absent
+  device. ONNX is additionally driven through `FaceLivenessEngine` end-to-end
+  on the genuine-face fixture. Availability is probed, never assumed, so the
+  same contract holds on a host where TFLite is installed.
+
+### Added — Diagnostic opt-in mode with local-only debug panel
+
+- Closes the acceptance audit's last 🟡 for diagnostic mode ("opt-in raw-score
+  UI mode not fully surfaced"). `mosip.liveness.diagnostics-enabled`
+  (default off, `LIVENESS_DIAGNOSTICS_ENABLED`) turns on a fail-closed
+  collector that retains exactly what orchestration spec §10 allows — raw
+  passive scores, per-frame timings, FPS and the scorer delegate — in a
+  bounded 120-frame ring with a sliding 5 s FPS window and an injected clock.
+  Disabled, nothing is retained at all: an opt-in that silently buffered
+  would be indistinguishable from always-on.
+- `GET /api/v1/diagnostics` is the panel's read side with two independent
+  fail-closed gates: opted in **and** loopback (judged through
+  `ClientIpResolver`, so a local reverse proxy cannot launder a remote caller
+  into `local`). Both failures return the same empty 404 — remote probes learn
+  neither the mode's existence nor its state — and 200s are `no-store`.
+- The test console gains the debug panel: hidden until the endpoint answers
+  200, polling only while visible, showing delegate, FPS, last/median raw
+  scores, avg/max frame ms and the per-frame table. No pixels anywhere: the
+  input is the decision DTO, and a test serialises the snapshot to prove no
+  frame-shaped payload can appear (spec §10 "still no pixels").
+- 15 new tests: collector aggregation/window/ring/no-pixels
+  (`DiagnosticsServiceTest`), endpoint gating (`DiagnosticsControllerTest`),
+  loopback judgement incl. trusted-proxy chains (`ClientIpResolverTest`), and
+  the frames hook (`FramesControllerTest`).
+
+### Added — Desktop JavaFX LivenessChallengeOverlay (ui-ux-design.md)
+
+- `client/LivenessChallengeOverlay` + `fxml/LivenessChallengeOverlay.fxml`
+  (with `liveness-overlay.css`) implement the Desktop surface the design doc
+  pointed at a stub for: preview slot (JavaFX ImageView path), oval
+  positioning guide, and status / challenge / failure cards driven by the
+  shared orchestrator events (`LivenessStateEvent` / `LivenessFinalResult`
+  via `overlay.asListener()`) — challenge index "Challenge 1 / N", normalised
+  progress (indeterminate until the combined score is known), the live
+  feedback cycle continue → detected → hold, context-sensitive Retry (only
+  `ATTEMPT_FAILED` / `RETRY_WAIT` / recoverable `DEVICE_ERROR`, never on
+  terminal failure) + Cancel, the green PASSED oval accent, and the LOCK_OUT
+  "Try again in Ns" countdown (design §1/§3/§4 state table).
+- Every decision lives in the pure `LivenessOverlayPresenter`, verified by 27
+  headless tests that walk each row of the design's state table, plus 3 FXML
+  contract tests (`fx:id` ↔ `@FXML` parity, card structure, stylesheet) — the
+  suite never needs a JavaFX toolkit. The default catalogue mirrors the
+  Flutter `LivenessView.defaultMessages` string-for-string and a test parses
+  the Dart source, so Desktop and Android cannot drift apart (design §6: same
+  states, same keys on every surface); Desktop adds only the documented
+  action/template keys (`liveness.action.*`, `liveness.challenge.index`,
+  `liveness.lockout.retry_in`, `liveness.cancelled`,
+  `liveness.device.disconnected`).
+- JavaFX enters the build as `provided` scope and is explicitly excluded from
+  both the full and `-slim` service jars (verified by inspecting the
+  repackage output): the overlay runs inside the MOSIP Registration Client
+  host, never in the backend.
+
+### Added — Signed-manifest model activation (Android ModelStore glue)
+
+- `SignedModelManifest` + `SignedManifestModelStore` close the gap the
+  `ModelStore` javadoc promised ("sha256 + signature at the glue layer") but
+  no implementation shipped: activation now requires a spec §13 manifest —
+  `{modelId, version, sha256, minAppVersion}` under a SHA256withRSA vendor
+  signature — whose digest binds to the exact payload bytes, followed by an
+  atomic swap that keeps the previous version for `rollback()` after a failed
+  health check. The bare unsigned `activate(modelId, version, payload)` path
+  fails closed (returns false), and a configured app version enforces the
+  manifest's `minAppVersion` gate (malformed versions refused). Without the
+  signature a stored sha256 proved nothing: whoever can rewrite the model
+  file can rewrite its recorded hash — the vendor signature anchors it.
+- `android_client` gains `AndroidModelStore`: file I/O glue that loads a
+  properties-format manifest + payload and delegates all verification to the
+  engine store (security logic stays pure-JVM, so it is engine-tested).
+- `SignedManifestModelStoreTest` — 10 tamper tests: mutated model bytes
+  (previous model kept), manifest digest rewritten to match tampered bytes,
+  mutated modelId/version/minAppVersion fields, flipped/odd-length/empty
+  signature hex, wrong signing key, unsigned/null/empty/blank refusals, the
+  min-app-version gate (newer → refused, malformed → refused, unconfigured →
+  no gate), and spec §13 rollback.
+
+### Added — Per-PAI-species APCER reporting (eval)
+
+- `ScenarioReport` now carries a **per-species APCER breakdown**:
+  `apcerBySpecies` maps each attack `PresentationLabel` to an immutable
+  `SpeciesApcer` row (presentations, accepted-as-bona-fide, that species'
+  APCER); `BONA_FIDE` is excluded because its error rate is BPCER.
+  `AttackScenarioHarness.report()` groups its already-labelled results into
+  those rows, the aggregate `apcer` stays the presentation-weighted mean of
+  the breakdown (asserted), and `toString` prints it — e.g.
+  `apcerBySpecies={PRINTED_PHOTO=0.0167 (1/60), SCREEN_REPLAY=0.0000 (0/60),
+  VIDEO_REPLAY=0.0333 (2/60)}`.
+- Closes the ISO/IEC 30107-3 gap in `docs/resource-compliance.md` §02
+  (APCER was aggregate-only) — tracker G1 done; now 30 ✅ · 8 🟡 · 1 🔴.
+- Tests: three new cases in `AttackScenarioHarnessTest` — full-run grouping
+  with weighted-mean consistency, exact hand-built per-label math (1/3 for
+  one species vs a 1/5 aggregate), immutability of the map, and zero-count
+  species rows rendering 0.0 rather than NaN.
+
+### Documentation — Android RC version pins + auto-logout interplay
+
+- `android_client/README.md` now pins the Android stack **and verifies it
+  against the live RC repo** (`mosip/android-registration-client`, `main`
+  v1.1.1): Flutter 3.10.4 / Dart 3.0.3 (docs Technology Stack), the
+  docs-SDK-31 vs repo-`compileSdkVersion 34` drift flagged, **`pigeon:
+  ^10.0.1`** (the repo's own pubspec pin, so one generator version),
+  **CameraX ≥ 1.3.0** (the glue uses `ResolutionSelector`, which exists only
+  from 1.3.0; an SDK-31 toolchain falls back to 1.2.x + legacy
+  `setTargetResolution`), and the **Java-11-vs-17 question resolved**: 11 is
+  the *backend platform* figure, the RC app builds at Java 21 with
+  desugaring (so the `--release 17` engine jar links and dexes), and the
+  Spring Boot service itself needs JDK 17+ regardless.
+- Documents the **auto-logout ↔ liveness interplay**: worst-case gate bounds
+  (≤ retries × `maxSessionDurationMs` ≈ 150 s by policy floor; typical pass
+  < 10 s), the host contract (suppress the inactivity timer between
+  `startSession` and `onFinal`, refresh on every `onState`, timeout floor
+  above the worst case), and the fail-safe (logout anyway → view-model
+  dispose → `cancelSession` → ABORTED → gate fails closed — a lost retry,
+  never a bypass).
+- Closes the §05 version-pinning gap (tracker G3 done) and moves auto-logout
+  to partial (tracker G4 in progress, RC-side pause wiring pending) — now
+  29 ✅ · 8 🟡 · 2 🔴.
+
+### Documentation — ISO 30107-1 injection threat model
+
+- `design.md` gains a threat-model section for **digital injection attacks**
+  (virtual camera, hooked camera API, frame replay into the pipeline) — the
+  class ISO/IEC 30107-1 explicitly scopes out. Written in Part-1 vocabulary
+  (**PAI**, **attack presentation**, **bona fide presentation**, PAD
+  subsystem), it maps each `PresentationLabel` species to its PAI class, lays
+  out the layered countermeasures (signed capture binding, per-attempt
+  session/nonce binding, fail-closed pipeline, session-scoped rate-limited
+  frame ingestion, keyed audit chain, model integrity), and states the
+  residual risk — endpoint integrity is assumed at this layer, not enforced.
+  (Sequence-diagram and thread-safety sections renumbered to §7/§8; no
+  cross-references pointed at them.)
+- Closes two rows in `docs/resource-compliance.md` §01 — the scope-boundary
+  partial and the PAI-terminology gap — and marks tracker item G2 done
+  (now 28 ✅ · 7 🟡 · 4 🔴).
+
+### Added — Measured frame-rate fallback
+
+- `FrameRateMeter` measures the rate frames **actually arrive at** the
+  frame-source boundary (a clock-injected, 5 s sliding window over a wrapped
+  `FaceFrameSource.Listener`) instead of trusting the configured `maxFps`
+  ceiling advertised in `SourceCapabilities`.
+- The Android orchestrator consults the measured rate whenever the engine
+  escalates: below 5 fps — and for any rate that cannot be proven — BLINK is
+  excluded from the challenge draw, falling back to
+  `SMILE` / `TURN_HEAD_LEFT` / `TURN_HEAD_RIGHT`.
+  `FaceLivenessEngine.requestChallenge(sessionId, excludedTypes)` applies the
+  exclusion (recording it in the `CHALLENGE_ISSUED` audit event) and never
+  lets the pool go empty: excluding every allowed type falls back to the full
+  pool. Closes the "3 fps minimum → adaptive fallback" gap in
+  `docs/resource-compliance.md` §06 (now 26 ✅ · 8 🟡 · 5 🔴).
+- Tests: `FrameRateMeterTest` (rate math, window pruning, listener wrap),
+  `FrameRateFallbackTest` (a measured 4 fps stream excludes blink at issuance
+  and never prompts it; a healthy burst keeps the full pool; boundary table
+  incl. unmeasurable-rate-fails-closed), plus engine-level pool-exclusion and
+  empty-pool-guard tests in `EngineEscalationTest`.
+
+### Fixed — Liveness evidence binding
+
+- `AndroidLivenessOrchestrator` now records the sha256 of each attempt's
+  best-scoring frame into `LivenessEvidence.bestFrameSha256` (spec §8
+  `pass()` evidence field, analyse.md §5.4 binding). The field was declared
+  and signed but never assigned, so every evidence record carried a null
+  hash and the downstream `consistency(bestFrame, signedCapture)` check had
+  nothing to bind to. The hash resets with the nonce on every retry, so
+  evidence can only ever reference frames from the attempt it certifies.
+- `LivenessEvidenceBindingTest` (7 tests) proves the binding end to end: the
+  evidence's `bestFrameSha256` + nonce verified against a downstream signed
+  capture payload (spec §8 `bindingOk = isGateValid && consistency(...)`),
+  with tampering rejected — foreign-frame capture under a valid signature,
+  forged capture signature, evidence edited after signing (frame hash or
+  nonce), stale-nonce replay, capture bound to a foreign session, and an
+  expired gate window. The happy path recomputes the frame digest with an
+  independent SHA-256 to pin the hash to actual pixel bytes.
+
+### Added — Build hygiene
+
+- `FlywayMigrationReferenceTest`, a self-maintaining gate that fails the suite
+  when any owned file cites a Flyway migration that does not exist in
+  `db/migration` — the class of drift where a comment keeps citing a migration
+  the directory never had (the audit-chain javadoc and a test comment pointed
+  at a number the migration set had left behind) while every compiler and test
+  stays green. The gate discovers the migration set from the directory at
+  runtime instead of pinning a list, recognizes exact-filename, javadoc
+  code-span and prose citations, and self-validates by planting a dangling
+  citation. Rides the Unit CI job unchanged.
+
+### Added — Android liveness gate (Face Liveness + PAD orchestration)
+
+- New `io.mosip.liveness.android` package implementing the Android
+  Registration Client liveness orchestration on top of the shared engine
+  pipeline, so Resident/Operator/Supervisor flows behave identically on
+  Desktop and Android. The orchestrator owns the state machine
+  (IDLE → INITIALIZING → POSITIONING → PASSIVE_EVALUATING → challenge states
+  → PASSED / ATTEMPT_FAILED / RETRY_WAIT / TERMINAL_FAILURE / DEVICE_ERROR /
+  ABORTED), attempt/retry counting, per-attempt nonces, gate validity windows,
+  and signed evidence — while every frame is still scored by the same
+  `FaceLivenessEngine` decision logic the REST service uses.
+  Spec invariants pinned by tests: device errors and positioning hints never
+  consume the retry budget; every retry gets a fresh engine session, nonce and
+  challenge sequence; a PASSED gate is valid for a bounded window only
+  (`isGateValid` fails closed after expiry); a missing/invalid model fails
+  closed; an evidence-signing failure withholds evidence instead of handing
+  out an unsigned record; PAD failures surface only the generic
+  `liveness.pad.generic` key to the UI.
+- `AndroidLivenessPolicyProvider` resolves per-role policy from the shared
+  `WorkflowPolicyDefaults` table and then clamps to a hard security floor in
+  code (threshold ≥ 0.60, retries ≤ 5, challenge window 3–20 s); disabling
+  liveness via config is refused and audited unless the
+  `mosip.liveness.android.allow-disable` build flag is set.
+- Vendor-neutral `FaceFrameSource` SPI with a deterministic
+  `MockFaceFrameSource` (spec §11 vendor independence; the same suite runs
+  against mock + CameraX adapters).
+- `android_client/` integration tree: Pigeon API definition
+  (`pigeon/liveness.dart`), Flutter `LivenessViewModel`/`LivenessView`
+  (i18n-key rendering, capture enabled only on PASSED), and the Android-only
+  glue — `CameraXFaceSource` (keep-only-latest, ≤640x480 analysis),
+  `AndroidKeystoreEvidenceSigner` (non-exportable RSA-2048 evidence key), and
+  the `LivenessPigeonBridge` host-api sketch (frames never cross the channel —
+  preview is a Flutter Texture).
+- `AndroidLivenessOrchestratorTest` (13 tests) drives the full gate against
+  the mock backend: passive pass, escalation to an engine-selected challenge
+  (performed prompt-by-prompt, never user-chosen), PAD block, device-error
+  neutrality, gate expiry, evidence signing and the policy floor.
 
 ### Added
 - The config audit chain's hashes are now **keyed** (`AuditChainKey`), so a

@@ -197,4 +197,38 @@ public class ClientIpResolver {
     // repeated *capturing* group Java returns only its last repetition ("113.").
     private static final Pattern IPV4_PORT = Pattern.compile(
             "^((?:\\d{1,3}\\.){3}\\d{1,3}):\\d+$");
+
+    /** 127.0.0.0/8 in dotted-quad form — the shape {@code getRemoteAddr()} returns. */
+    private static final Pattern LOOPBACK_V4 = Pattern.compile("^127(?:\\.\\d{1,3}){3}$");
+
+    /**
+     * True only for a loopback client: {@code 127.0.0.0/8} (also seen
+     * IPv4-mapped as {@code ::ffff:127.0.0.1}), {@code ::1} or its long form.
+     * Everything else — including an address a trusted proxy forwarded on
+     * behalf of a remote caller — is not local.
+     *
+     * <p>Used by {@link DiagnosticsController} to keep diagnostic mode
+     * reachable from this machine only (spec §10: opt-in, <em>local</em>).
+     */
+    public static boolean isLoopback(String address) {
+        if (address == null || address.isBlank()) {
+            return false;
+        }
+        String value = address.trim();
+        if (value.regionMatches(true, 0, "::ffff:", 0, 7)) {
+            value = value.substring(7);
+        }
+        if (value.equalsIgnoreCase("::1") || value.equalsIgnoreCase("0:0:0:0:0:0:0:1")) {
+            return true;
+        }
+        if (!LOOPBACK_V4.matcher(value).matches()) {
+            return false;
+        }
+        for (String octet : value.split("\\.")) {
+            if (Integer.parseInt(octet) > 255) {
+                return false;
+            }
+        }
+        return true;
+    }
 }

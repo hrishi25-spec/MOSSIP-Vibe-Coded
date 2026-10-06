@@ -31,12 +31,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * connection has, and it is the only way to produce the broken state.
  *
  * <p>Runs on H2, whose schema Hibernate generates from the entities, so these
- * tests cannot prove the V6 PostgreSQL triggers — only the chain logic, which
+ * tests cannot prove the V9 PostgreSQL triggers — only the chain logic, which
  * is database-independent. The triggers are validated by the {@code schema} CI
  * job.</p>
  */
 @DataJpaTest(properties = {
-        // The V1-V6 migrations are Postgres SQL; on H2 the schema comes from the
+        // The Flyway migrations are Postgres SQL; on H2 the schema comes from the
         // entities, which is what EntityPersistenceTest does too.
         "spring.flyway.enabled=false",
         "spring.jpa.hibernate.ddl-auto=create-drop"
@@ -405,7 +405,7 @@ class AuditChainTamperTest {
     @Test
     @DisplayName("the repository reports the newest chained entry as the link target")
     void headLookupSkipsUnchainedLegacyRows() {
-        // A legacy row: no hashes at all, as written before V6.
+        // A legacy row: no hashes at all, as written before V9.
         repo.saveAndFlush(AuditLog.builder()
                 .id(UUID.randomUUID())
                 .eventType(AuditEventType.CONFIG_CHANGED.name())

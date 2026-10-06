@@ -17,7 +17,8 @@ import java.util.List;
  * Proxy attack corpus for threshold calibration.
  *
  * <p>No recorded physical presentations (real prints, real screen replays)
- * exist in this repository (docs/status-report.md §4.5 — the corpus gap). Until
+ * exist in this repository (docs/status-report.md §4, Finding 5 — the corpus
+ * gap). Until
  * such captures exist, this generator renders {@link SyntheticScene} frames and
  * degrades them the way a printed photo or a screen replay degrades a capture:</p>
  * <ul>
