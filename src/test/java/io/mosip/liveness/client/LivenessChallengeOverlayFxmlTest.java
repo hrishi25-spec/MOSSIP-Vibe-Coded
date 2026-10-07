@@ -37,7 +37,11 @@ class LivenessChallengeOverlayFxmlTest {
         Document doc = parse(FXML);
         Element root = doc.getDocumentElement();
 
-        assertEquals("StackPane", root.getTagName(), "overlay root is a StackPane");
+        assertEquals("fx:root", root.getTagName(),
+                "the root must be <fx:root>: with a concrete element FXMLLoader builds its own root "
+                        + "and rejects the controller instance handed in via setRoot");
+        assertEquals("javafx.scene.layout.StackPane", root.getAttribute("type"),
+                "<fx:root> must name the overlay class the host supplies");
         assertTrue(styleClasses(root).contains("liveness-overlay"));
         assertEquals("false", root.getAttribute("visible"), "hidden until the first event");
         assertEquals("false", root.getAttribute("managed"), "unmanaged while hidden");

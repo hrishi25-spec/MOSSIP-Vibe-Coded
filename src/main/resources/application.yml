@@ -28,7 +28,7 @@ spring:
   datasource:
     url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:pad_liveness}
     username: ${POSTGRES_USER:mosip}
-    password: ${POSTGRES_PASSWORD:change_me}
+    password: ${POSTGRES_PASSWORD}
     driver-class-name: org.postgresql.Driver
     hikari:
       # 5 connections are ample for the few writes per frame/challenge and
@@ -106,10 +106,18 @@ mosip:
       # addresses — a client can send these headers itself.
       trusted-proxies: ${TRUSTED_PROXIES:}
   liveness:
-    # Passive liveness scorer:
-    #   auto      - MiniFASNet-V2 (ONNX, bundled in resources/models) when it
-    #               loads; the OpenCV quality heuristic otherwise
-    #   heuristic - force the OpenCV quality heuristic (model-less CI/debug)
+    # Passive liveness scorer — ONE key drives both wirings: the HTTP
+    # scoring service and the LivenessBackend SPI bean (interop report F5):
+    #   auto               - MiniFASNet-V2 (ONNX, bundled in resources/models)
+    #                        when it loads; the OpenCV quality heuristic
+    #                        otherwise (SPI bean: the scripted mock)
+    #   heuristic          - force the OpenCV quality heuristic (model-less
+    #                        CI/debug; SPI bean: the scripted mock)
+    #   mock               - both paths: the scripted MockLivenessBackend
+    #   onnx-minifasnet-v2 - both paths: that backend by its audit id;
+    #   mediapipe-facemesh    explicit ids NEVER silently fall back to a
+    #   tflite-minifasnet     different scorer — unavailable means a coded,
+    #                        fail-closed error at startup or first use
     backend: auto
     # Optional filesystem override of the bundled model (blank = classpath)
     model-path: ""

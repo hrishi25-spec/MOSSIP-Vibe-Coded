@@ -4,6 +4,215 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - 2026-10-06
 
+### Added — One backend-selection key for both wirings (interop report F5)
+
+- `mosip.liveness.backend` now selects the backend for **both** paths behind
+  one vocabulary (`LivenessBackendSelection`): the HTTP scorer
+  (`PassiveScoringService`) and the `LivenessBackend` SPI bean
+  (`AppConfig.livenessBackend()`, consumed by `FaceLivenessEngine`). The
+  default `auto` — and `heuristic` — keep each path byte-for-byte on today's
+  behaviour (service: ONNX→heuristic; SPI bean: the scripted mock), so the
+  key changes nothing until a deployment opts in. Explicit ids (`mock`,
+  `onnx-minifasnet-v2`, `mediapipe-facemesh`, `tflite-minifasnet`) move both
+  paths together, named by the same audit ids the interop contract pins.
+- Explicit means strict: an id that cannot load fails closed with a coded
+  `LivenessException` naming the key (service: cached, rethrown, never a
+  silent swap to the heuristic; engine: the existing
+  `DEVICE_CONNECTION_FAILURE` mapping), and an unknown value fails at bean
+  construction — a typo must stop startup, not quietly pick another scorer
+  (the divergence F5 is about). `model-path` applies to ONNX selections;
+  construction loads nothing at boot (the engine calls `initialize()`).
+- Tests: `LivenessBackendSelectionTest` (5 — vocabulary, fail-fast, SPI
+  factory by id, mock default, the Spring bean mapping the same key),
+  `PassiveScoringServiceTest` +4 (explicit mock/ONNX honoured, unavailable
+  MediaPipe refuses closed with the key in the message — availability probed,
+  not assumed — unknown mode fails at construction), and the interop suite +1
+  constructing the engine **through the selection path** for every selectable
+  id (the report's own recommendation on F5). F5 and recommendation 3 are
+  marked resolved in the report; configuration docs and the yml comments
+  document the shared semantics.
+
+### Added — Measured per-frame latency and throughput for the mock and ONNX backends
+
+- `BackendPerFrameLatencyTest` measures what one SPI conversation costs at
+  the seam: the identical genuine-face fixture (256×320) through
+  `analyzeFrame → assessPad → scorePassiveLiveness` in engine order,
+  single-threaded, decode excluded, 10 warm-up frames then 100 measured
+  frames per backend. Results land in
+  `target/backend-latency-results.txt` and in the interoperability report's
+  new section 10. Assertions are sanity-level only (every frame scored in
+  `[0,1]`, positive latency, ≥ 1 fps floor) — timing is host-dependent, so
+  the test guards the measurement, not a wall-clock target.
+- **Numbers (one run, Linux x86_64, 4 × i3-1005G1, OpenJDK 17.0.20.1, ORT
+  1.24.2 CPU):** mock **0.017 ms/frame mean** (p95 0.037, ≈59,515 fps);
+  ONNX **156.768 ms/frame mean** (analyze 46.680 · pad 54.386 · score
+  55.702; p50 148.039, p95 206.396, max 309.050; **6.4 fps**), genuine face
+  scoring `[0.9950, 0.9950]` on every frame.
+- The phase costs confirm at the seam what the HTTP stage timers found
+  end-to-end: `scorePassiveLiveness` and `assessPad` each call
+  `probabilitiesFor(frame)` independently, so one qualifying frame pays
+  three Haar cascades and two inferences — and 6.4 fps single-threaded sits
+  under the 10–15 fps analysis budget, so camera rate needs that duplication
+  removed or scoring parallelised. The report gains the data (section 10),
+  finding **F7**, and an amended limitation 4 (seam timing now measured;
+  end-to-end/device timing stays out of scope).
+
+### Added — MODEL_UPDATED audit events from the signed-manifest store
+
+- `SignedManifestModelStore` now audits what spec §10 defines
+  (`MODEL_UPDATED: old/new version, hash ok`) through an `AuditLogger`
+  (no-op on the existing constructors, so every current caller is
+  unchanged): each `activate` call and each `rollback` emits exactly one
+  event. A swap carries `action=SWAP`, the old version (`none` for a first
+  install), the new version and `hashOk=true`. A refusal carries
+  `action=ROLLBACK` with `oldVersion == newVersion` (the previous model is
+  kept) and a `reason` naming the failing check — `INPUT`, `SIGNATURE`,
+  `HASH`, `MIN_APP_VERSION` or `UNSIGNED` — while `hashOk` stays
+  independent of it: a payload whose digest matches but whose signature does
+  not is recorded as `hashOk=true, reason=SIGNATURE`, a tampered payload as
+  `hashOk=false, reason=HASH`. `rollback()` emits spec §13's
+  `MODEL_UPDATED(rollback)` — `reason=HEALTH_CHECK`, the undone and restored
+  versions, `hashOk=true` (both states were digest-verified when swapped in:
+  what failed is the health check, not the hash).
+- Events carry no session or workflow — a model update is not a liveness
+  decision — and are emitted *before* any state change, so an audit sink
+  that throws aborts the transition fail-closed instead of leaving a swap
+  the trail never saw. The unsigned bare-interface path is audited too
+  (`reason=UNSIGNED`) instead of silently returning false, and
+  `AndroidModelStore` gains audit-forwarding constructors. The old "the
+  caller audits MODEL_UPDATED(rollback)" contract in `ModelStore` now notes
+  that audited stores discharge it themselves, so callers must not log it a
+  second time.
+- `SignedManifestModelStoreAuditTest` (9 tests) pins every field above plus
+  the no-session/no-workflow shape and exactly-one-event-per-call;
+  red-proved by forcing the emitted `hashOk` to `true`, which failed exactly
+  the two refusal-field assertions while every decision stayed correct.
+
+### Added — Key ids on signed model manifests (signing-key rotation)
+
+- `SignedModelManifest` carries a `keyId` — the SHA-256 hex of the signing
+  key's X.509 encoding, derivable from either half of the RSA pair and
+  externally via `openssl pkey -pubin -in vendor-public.pem -outform DER |
+  sha256sum`. `sign(...)` stamps it automatically; the canonical payload
+  stays spec §13's four fields, so pre-keyid manifests verify
+  byte-identically and old readers (which never load the property) keep
+  verifying new ones. The id sits outside the signature but selects the
+  verifying key, and `verifySignature` additionally requires a named id to
+  match the key it is checked under — a rewritten id cannot hop to another
+  trusted key.
+- `SignedManifestModelStore` now verifies against a key *ring*:
+  `new SignedManifestModelStore(appVersion, previousKey, currentKey)` covers
+  the rotation window; an id present is authoritative (exactly that key or
+  refuse — never a fallback), a blank id is a legacy manifest verified under
+  any key still trusted, and revoking a key means constructing without it
+  (everything it signed is refused, kid-less manifests included). The
+  single-key constructors keep their exact behaviour as a ring of one, an
+  empty ring throws at construction, and `AndroidModelStore` gains the same
+  rotation constructor while reading the `keyId` property.
+- The manifest tool writes the `keyId` line (always — same lesson as
+  `minAppVersion`: a *missing* key loads as null) and self-checks it on
+  reload. `SignedManifestRotationTest` (7 tests) pins derivation, the
+  keyring, legacy fallback, revocation, id-hop and unknown-id refusal, and
+  the construction guards; `ModelManifestToolTest` (now 10) proves rotation
+  end-to-end through the written file plus a stripped pre-keyid file still
+  installing. All pre-existing manifest tests pass unmodified — the
+  five-field constructor and kid-less verification are unchanged.
+
+### Added — Model-manifest generator tool (`ModelManifestTool`)
+
+- `io.mosip.liveness.tools.ModelManifestTool` produces the vendor-signed
+  properties manifest `AndroidModelStore.install(...)` reads (spec §13), so
+  deployments can package a model release instead of hand-rolling the format:
+  `sign` hashes the artifact with the same SHA-256 the store re-derives at
+  activation, signs `modelId|version|sha256|minAppVersion` (SHA256withRSA) and
+  writes the five keys deterministically (ASCII-escaped, so a hostile
+  modelId/version can't forge a `key=value` line or a comment); `keygen`
+  bootstraps a 2048-bit PKCS#8 vendor keypair, refusing to overwrite an
+  existing key or emit a sub-2048 one. Legacy PKCS#1 PEM keys (`openssl
+  genrsa`) are wrapped and accepted.
+- The tool fails closed: usage errors exit 2, operational errors exit 1 with
+  no manifest left behind — and before returning, `sign` re-reads the bytes it
+  wrote and verifies them under the signing key, so an escaping or I/O defect
+  fails the command instead of shipping a file the device would refuse.
+  `ModelManifestToolTest` (8 tests) round-trips through the client's own
+  `Properties.load` path and the engine's `SignedManifestModelStore`: install,
+  tampered payload, rewritten field, hostile values, the `minAppVersion` gate,
+  a PKCS#1 key, and every failure exit.
+
+### Added — The desktop overlay now renders the service-mediated path too
+
+- `DesktopLivenessAdapter` (the REST/session path, as opposed to the on-device
+  orchestrator) emits the same `LivenessStateEvent` / `LivenessFinalResult` pair
+  the  orchestrator emits, so one overlay renders both: point the adapter's listener
+  at the overlay's `asListener()`, and the desktop client no longer needs the
+  orchestrator in process. The pre-existing raw-DTO callback surface is untouched
+  and still fires alongside the listener.
+- `ServiceLivenessEventMapper` is the whole translation, as a pure function of
+  one response plus the session's frozen policy and the client's counters —
+  framing, challenge prompts, the challenge counter, attempt failures, the
+  terminal vocabulary, transport failures and the host's cancel all map without
+  a network, a clock or a node. Two rules carry over from the orchestrator: the
+  client renders catalogue keys and never the service's English `message`, and
+  it counts attempts where the budget lives (so a spent budget renders recovery
+  guidance with no retry).
+- The client now reads two things the service already returned and the client
+  threw away: the policy frozen on the session at creation (`SessionInfo.policy`
+  — minChallengeCount, maxRetries, onRepeatedFailure) and the follow-up challenge
+  issued by a validation response. Without the policy the overlay cannot draw
+  "Challenge 1 / N", and without the follow-up it cannot prompt the next
+  challenge. The response parsers are static and pinned by JSON literals
+  (`LivenessHttpClientParseTest`, 8 tests), including both id shapes the service
+  uses for a challenge (`challengeId` on frames, `id` on validations).
+- Details that only show up in a live session: a re-served challenge does not
+  advance the counter (the service answers every frame with the same
+  `escalate_to_active` while a challenge is open); a `reject` is retryable with
+  Retry restarting the gate as a fresh session, while recovery guidance comes
+  from the budget-exhausted vocabulary or a `reject` whose closed session reports
+  `max_retries_exceeded`; and transport failures are split by entry point —
+  `startSession` propagates, `onFrame`/`submitChallenge` render the recoverable
+  `DEVICE_ERROR` and keep the session open, because frames arrive from the
+  streamer's decode loop where throwing would kill it.
+- Tests: `ServiceMediatedOverlayTest` (7) drives the adapter from off the FX
+  thread — as the host's Streamer loop does — into the real overlay and asserts
+  the rendered cards; `ServiceLivenessEventMapperTest` (22) pins the mapping
+  table. The overlay tests now share one toolkit harness (`HeadlessFx`), since a
+  test JVM can only start JavaFX once. Suite: 488 tests, 0 failures, exit 0.
+
+### Added — Headless JavaFX render smoke test, and the two overlay defects it found
+
+- `LivenessChallengeOverlaySmokeTest` (10 tests) builds the real overlay — real
+  `FXMLLoader`, real `liveness-overlay.css`, real layout pass — and reads the
+  rendered nodes back. JavaFX is pinned to Monocle's headless glass platform in
+  the surefire configuration, so no display, window system or GPU is involved
+  and the CI runner runs it unchanged. Every `LivenessState` is asserted
+  against the card the design's state table gives it, together with the copy,
+  the CSS-resolved white text, the laid-out card bounds, the Retry / Cancel
+  affordances, the red failure tone and the green PASSED oval; the LOCK_OUT
+  countdown, the button callbacks and a swapped i18n catalogue are covered
+  too. The state→card expectations are spelled out in the test rather than
+  read from the presenter, so one wrong mapping cannot pass twice.
+- Two rendering defects the test found, both fatal to a path that had never
+  been executed end to end:
+  - `LivenessChallengeOverlay.fxml` declared a concrete `<StackPane>` root, so
+    **every** `new LivenessChallengeOverlay()` threw `LoadException: Root
+    value already specified.` — `FXMLLoader` only accepts a pre-set root for
+    an `<fx:root>` document and otherwise insists on building the root itself.
+    The file now declares `<fx:root>` whose `type` is `javafx.scene.layout.StackPane`,
+    which is what makes `setRoot(this)` + `setController(this)` work at all;
+    the DOM-level FXML test asserts the fx:root form so it cannot regress.
+  - Retry and Cancel rendered as blank buttons: the FXML declares bare
+    `<Button>`s and the renderer only ever toggled their visibility, never
+    their text. Both labels now resolve through the catalogue
+    (`liveness.action.retry` / `liveness.action.cancel`), so a deployment's
+    swapped catalogue reaches them.
+- `openjfx-monocle` is pinned to `${javafx.version}` (17.0.10) rather than the
+  `jdk-12.0.1+2` build TestFX's own documentation points at: the old build
+  dies with `AbstractMethodError` on `Window._updateViewSize` the moment the
+  first window is created, and a mismatch there would have been read as "the
+  smoke test is flaky".
+- Suite: 451 tests, 0 failures, exit 0; the reference gate stays green (the new
+  test file is scanned by it).
+
 ### Added — Config-key reference gate (`mosip.liveness.*`)
 
 - `FlywayMigrationReferenceTest` gains a third rule: the build fails when any

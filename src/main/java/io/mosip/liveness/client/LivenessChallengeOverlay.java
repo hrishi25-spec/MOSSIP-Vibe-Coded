@@ -40,6 +40,12 @@ import java.util.Map;
  * machine drives all surfaces), delivered straight from the orchestrator's
  * {@link LivenessListener} and marshalled onto the FX Application Thread.
  *
+ * <p>The event pair is also what the service-mediated path emits: when the gate
+ * runs against this repository's REST API instead of in process,
+ * {@link DesktopLivenessAdapter} translates its responses into the very same
+ * events ({@link ServiceLivenessEventMapper}), so this overlay renders either
+ * path without knowing which one it is driving.
+ *
  * <h3>Integration</h3>
  * <pre>
  * // On the JavaFX Application Thread, over the capture screen:
@@ -103,7 +109,9 @@ public class LivenessChallengeOverlay extends StackPane {
         }
         FXMLLoader loader = new FXMLLoader(fxml);
         // The overlay IS the FXML root and controller — deliberately no
-        // fx:controller attribute (that would instantiate a second copy).
+        // fx:controller attribute (that would instantiate a second copy), and
+        // the document declares <fx:root>: FXMLLoader only accepts a pre-set
+        // root for an fx:root document and otherwise builds its own.
         loader.setRoot(this);
         loader.setController(this);
         try {
@@ -263,8 +271,12 @@ public class LivenessChallengeOverlay extends StackPane {
             stopLockoutCountdown();
         }
 
+        // Labels, not just visibility: the FXML declares bare buttons, so
+        // without these two lines Retry and Cancel render as blank boxes.
+        retryButton.setText(resolve("liveness.action.retry"));
         retryButton.setVisible(view.visible() && view.retryVisible());
         retryButton.setManaged(retryButton.isVisible());
+        cancelButton.setText(resolve("liveness.action.cancel"));
         cancelButton.setVisible(view.visible() && view.cancelVisible());
         cancelButton.setManaged(cancelButton.isVisible());
     }

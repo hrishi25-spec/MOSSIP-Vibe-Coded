@@ -50,7 +50,7 @@ class FrameRateFallbackTest {
                 AndroidOrchestratorSupport.engine(backend, engineAudit), backend,
                 AndroidOrchestratorSupport.policyProvider(),
                 AuditLogger.noop(), clock, null, null, modelStore,
-                new AndroidOrchestratorSupport.DirectExecutorService());
+                new AndroidOrchestratorSupport.DirectExecutorService(), false);
     }
 
     @AfterEach

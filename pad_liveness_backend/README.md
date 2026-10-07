@@ -93,6 +93,18 @@ alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
+## Running tests
+
+The API behavior tests use an isolated in-memory SQLite database and stub
+only the model engines, so they need neither PostgreSQL nor camera hardware.
+Install the pinned test dependencies and run them from this directory:
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
 ## Example flow (curl)
 
 ```bash

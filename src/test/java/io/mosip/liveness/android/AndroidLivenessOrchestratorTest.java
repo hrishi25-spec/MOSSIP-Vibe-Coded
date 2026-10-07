@@ -47,7 +47,7 @@ class AndroidLivenessOrchestratorTest {
                 AndroidOrchestratorSupport.engine(backend), backend,
                 AndroidOrchestratorSupport.policyProvider(),
                 AuditLogger.noop(), null, null, null, modelStore,
-                new AndroidOrchestratorSupport.DirectExecutorService());
+                new AndroidOrchestratorSupport.DirectExecutorService(), false);
     }
 
     @Test
@@ -57,7 +57,7 @@ class AndroidLivenessOrchestratorTest {
                 AndroidOrchestratorSupport.engine(backend), backend,
                 AndroidOrchestratorSupport.policyProvider(),
                 AuditLogger.noop(), null, null, null, empty,
-                new AndroidOrchestratorSupport.DirectExecutorService());
+                new AndroidOrchestratorSupport.DirectExecutorService(), false);
         AndroidOrchestratorSupport.RecordingListener listener = new AndroidOrchestratorSupport.RecordingListener();
         orchestratorNoModel.setListener(listener);
         orchestratorNoModel.start(LivenessRole.RESIDENT, null, AndroidOrchestratorSupport.source(3),
@@ -214,7 +214,7 @@ class AndroidLivenessOrchestratorTest {
                 AndroidOrchestratorSupport.engine(backend), backend,
                 AndroidOrchestratorSupport.policyProvider(), AuditLogger.noop(), mutableClock,
                 null, null, modelStore,
-                new AndroidOrchestratorSupport.DirectExecutorService());
+                new AndroidOrchestratorSupport.DirectExecutorService(), false);
         // inline frames: same reflection trick as setUp
         AndroidOrchestratorSupport.RecordingListener listener = new AndroidOrchestratorSupport.RecordingListener();
         timed.setListener(listener);
@@ -256,7 +256,7 @@ class AndroidLivenessOrchestratorTest {
                 AndroidOrchestratorSupport.engine(backend), backend,
                 AndroidOrchestratorSupport.policyProvider(), AuditLogger.noop(), null,
                 new LivenessEvidenceSigner.AlwaysFailingSigner(), null, modelStore,
-                new AndroidOrchestratorSupport.DirectExecutorService());
+                new AndroidOrchestratorSupport.DirectExecutorService(), false);
         AndroidOrchestratorSupport.RecordingListener listener = new AndroidOrchestratorSupport.RecordingListener();
         broken.setListener(listener);
         MockFaceFrameSource source = AndroidOrchestratorSupport.source(10);

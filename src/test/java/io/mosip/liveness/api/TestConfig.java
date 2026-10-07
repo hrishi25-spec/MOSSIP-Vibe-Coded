@@ -1,6 +1,7 @@
 package io.mosip.liveness.api;
 
 import io.mosip.liveness.audit.AuditChainKey;
+import io.mosip.liveness.audit.MetricsCollector;
 import io.mosip.liveness.crud.AuditLogRepository;
 import io.mosip.liveness.crud.ChallengeRepository;
 import io.mosip.liveness.crud.ConfigPolicyRepository;
@@ -108,6 +109,11 @@ public class TestConfig {
     @Bean @Primary
     public RateLimitCounters rateLimitCounters() {
         return Mockito.mock(RateLimitCounters.class);
+    }
+
+    @Bean @Primary
+    public MetricsCollector metricsCollector() {
+        return Mockito.mock(MetricsCollector.class);
     }
 
     /**

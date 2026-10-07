@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/foundation.dart';
 
 import '../pigeon/liveness.dart';
@@ -23,18 +21,40 @@ enum LivenessUiState {
 }
 
 LivenessUiState uiStateFrom(String? name) => LivenessUiState.values.firstWhere(
-      (s) => s.name.toUpperCase() == (name ?? '').toUpperCase(),
+      (state) => state.name.toUpperCase() == (name ?? '').toUpperCase(),
       orElse: () => LivenessUiState.deviceError,
     );
 
-/// ViewModel for the resident/operator/supervisor liveness gate
-/// (spec §2 LivenessScreen / ViewModel). Sends start/cancel commands only;
-/// receives generic events with i18n keys (R5).
-class LivenessViewModel extends ChangeNotifier {
-  LivenessViewModel({LivenessHostApi? hostApi}) : _hostApi = hostApi;
+/// Small host seam for the generated Pigeon client and the no-host harness.
+abstract class LivenessHost {
+  Future<LivenessStartResult> startSession(String role, String? userId);
+  Future<void> cancelSession();
+  Future<bool> isGateValid();
+}
 
-  final LivenessHostApi? _hostApi;
-  StreamSubscription<_NativeEvent>? _events;
+class PigeonLivenessHost implements LivenessHost {
+  PigeonLivenessHost({LivenessHostApi? api}) : _api = api ?? LivenessHostApi();
+
+  final LivenessHostApi _api;
+
+  @override
+  Future<LivenessStartResult> startSession(String role, String? userId) =>
+      _api.startSession(role, userId);
+
+  @override
+  Future<void> cancelSession() => _api.cancelSession();
+
+  @override
+  Future<bool> isGateValid() => _api.isGateValid();
+}
+
+/// ViewModel for the resident/operator/supervisor liveness gate. It sends
+/// start/cancel commands and receives only generic events with i18n keys (R5).
+class LivenessViewModel extends ChangeNotifier {
+  LivenessViewModel({LivenessHost? hostApi})
+      : _hostApi = hostApi ?? _UnavailableLivenessHost.instance;
+
+  final LivenessHost _hostApi;
 
   LivenessUiState _state = LivenessUiState.idle;
   String? _uiMessageKey;
@@ -63,23 +83,28 @@ class LivenessViewModel extends ChangeNotifier {
   int? get lockoutSeconds => _lockoutSeconds;
   String? get nextAction => _nextAction;
 
-  /// The existing capture button is enabled only on PASSED (spec §14).
+  /// Downstream capture/auth must re-check gate validity before proceeding.
   bool get captureEnabled => _captureEnabled;
 
-  /// Wire the Pigeon FlutterApi callback (called once from the app shell).
-  void bindFlutterApi(LivenessFlutterApi flutterApi) {
-    // The generated dispatcher routes onState/onFinal here; see android glue.
-    _events?.cancel();
-    _events = _NativeEventBus.instance.attach(flutterApi, _handleEvent);
+  /// Register the generated callback handler with the Flutter binary messenger.
+  /// The MOSIP host calls this once for each active liveness screen.
+  void bindFlutterApi() {
+    LivenessFlutterApi.setup(_ViewModelFlutterApi(this));
   }
 
   Future<void> startSession(LivenessRole role, {String? userId}) async {
     _reset();
     _state = LivenessUiState.initializing;
     notifyListeners();
-    final host = _hostApi ?? _DefaultHost.instance;
-    final result = await host.startSession(role.name, userId);
-    if (result.errorCode != null) {
+    try {
+      final result =
+          await _hostApi.startSession(role.name.toUpperCase(), userId);
+      if (result.errorCode != null) {
+        _state = LivenessUiState.deviceError;
+        _uiMessageKey = 'liveness.device.error';
+        notifyListeners();
+      }
+    } catch (_) {
       _state = LivenessUiState.deviceError;
       _uiMessageKey = 'liveness.device.error';
       notifyListeners();
@@ -87,53 +112,46 @@ class LivenessViewModel extends ChangeNotifier {
     // Subsequent updates arrive via onState/onFinal through the FlutterApi.
   }
 
-  Future<void> cancelSession() async {
-    final host = _hostApi ?? _DefaultHost.instance;
-    await host.cancelSession();
+  Future<void> cancelSession() => _hostApi.cancelSession();
+
+  /// Gate consumption (spec §8): refuse if the validity window has elapsed.
+  Future<bool> ensureGateValidForCapture() => _hostApi.isGateValid();
+
+  void _handleStateEvent(LivenessStateEvent event) {
+    _state = uiStateFrom(event.state);
+    _uiMessageKey = event.uiMessageKey;
+    _hint = event.hint;
+    _challenge = event.challenge;
+    _challengeIndex = event.challengeIndex;
+    _challengeTotal = event.challengeTotal;
+    _progress = event.progress;
+    _attemptsUsed = event.attemptsUsed ?? _attemptsUsed;
+    _attemptsMax = event.attemptsMax ?? _attemptsMax;
+    _failCategory = event.failCategory;
+    if (_state == LivenessUiState.passed) {
+      _captureEnabled = true;
+    } else if (_state == LivenessUiState.deviceError ||
+        _state == LivenessUiState.terminalFailure) {
+      _captureEnabled = false;
+    }
+    notifyListeners();
   }
 
-  /// Gate consumption (spec §8): downstream capture/auth must refuse when the
-  /// validity window has elapsed.
-  Future<bool> ensureGateValidForCapture() async {
-    final host = _hostApi ?? _DefaultHost.instance;
-    return host.isGateValid();
-  }
-
-  void _handleEvent(_NativeEvent event) {
-    if (event.isFinal) {
-      _nextAction = event.finalResult.nextAction;
-      _lockoutSeconds = event.finalResult.lockoutSeconds;
-      switch (event.finalResult.outcome) {
-        case 'PASSED':
-          _state = LivenessUiState.passed;
-          _captureEnabled = true; // gate satisfied → capture may proceed
-          break;
-        case 'ABORTED':
-          _state = LivenessUiState.aborted;
-          _captureEnabled = false;
-          break;
-        default:
-          _state = LivenessUiState.terminalFailure;
-          _captureEnabled = false;
-      }
-    } else {
-      final e = event.stateEvent;
-      _state = uiStateFrom(e.state);
-      _uiMessageKey = e.uiMessageKey;
-      _hint = e.hint;
-      _challenge = e.challenge;
-      _challengeIndex = e.challengeIndex;
-      _challengeTotal = e.challengeTotal;
-      _progress = e.progress;
-      _attemptsUsed = e.attemptsUsed ?? _attemptsUsed;
-      _attemptsMax = e.attemptsMax ?? _attemptsMax;
-      _failCategory = e.failCategory;
-      if (_state == LivenessUiState.passed) {
+  void _handleFinalResult(LivenessFinalResult result) {
+    _nextAction = result.nextAction;
+    _lockoutSeconds = result.lockoutSeconds;
+    switch (result.outcome) {
+      case 'PASSED':
+        _state = LivenessUiState.passed;
         _captureEnabled = true;
-      } else if (_state == LivenessUiState.deviceError ||
-          _state == LivenessUiState.terminalFailure) {
+        break;
+      case 'ABORTED':
+        _state = LivenessUiState.aborted;
         _captureEnabled = false;
-      }
+        break;
+      default:
+        _state = LivenessUiState.terminalFailure;
+        _captureEnabled = false;
     }
     notifyListeners();
   }
@@ -147,6 +165,7 @@ class LivenessViewModel extends ChangeNotifier {
     _challengeTotal = null;
     _progress = null;
     _attemptsUsed = 0;
+    _attemptsMax = 3;
     _failCategory = null;
     _lockoutSeconds = null;
     _nextAction = null;
@@ -154,54 +173,33 @@ class LivenessViewModel extends ChangeNotifier {
   }
 }
 
-enum LivenessRole { RESIDENT, OPERATOR, SUPERVISOR }
+enum LivenessRole { resident, operator, supervisor }
 
-/// Internal bridge between the generated Pigeon dispatcher and the view model.
-class _NativeEvent {
-  final LivenessStateEvent? stateEvent;
-  final LivenessFinalResult finalResult;
-  final bool isFinal;
-  _NativeEvent.state(this.stateEvent)
-      : finalResult = LivenessFinalResult(),
-        isFinal = false;
-  _NativeEvent.final_(this.finalResult)
-      : stateEvent = null,
-        isFinal = true;
+class _ViewModelFlutterApi extends LivenessFlutterApi {
+  _ViewModelFlutterApi(this._viewModel);
+
+  final LivenessViewModel _viewModel;
+
+  @override
+  void onState(LivenessStateEvent event) => _viewModel._handleStateEvent(event);
+
+  @override
+  void onFinal(LivenessFinalResult result) =>
+      _viewModel._handleFinalResult(result);
 }
 
-class _NativeEventBus {
-  _NativeEventBus._();
-  static final _NativeEventBus instance = _NativeEventBus._();
+class _UnavailableLivenessHost implements LivenessHost {
+  const _UnavailableLivenessHost._();
 
-  final StreamController<_NativeEvent> _controller =
-      StreamController.broadcast();
-
-  StreamSubscription<_NativeEvent> attach(
-          LivenessFlutterApi flutterApi, void Function(_NativeEvent) handler) =>
-      _controller.stream.listen(handler);
-
-  /// The Android glue's generated LivenessFlutterApiImpl forwards here.
-  void dispatchState(LivenessStateEvent e) => _controller.add(_NativeEvent.state(e));
-  void dispatchFinal(LivenessFinalResult r) => _controller.add(_NativeEvent.final_(r));
-}
-
-/// Fallback host used by widget tests and until the generated Pigeon host is
-/// registered by the Android embedding (see android_client/README.md).
-class _DefaultHost implements LivenessHostApi {
-  static final _DefaultHost instance = _DefaultHost._();
-  _DefaultHost._();
+  static const instance = _UnavailableLivenessHost._();
 
   @override
   Future<LivenessStartResult> startSession(String role, String? userId) async =>
-      LivenessStartResult()
-        ..errorCode = 'DEVICE_UNAVAILABLE';
+      LivenessStartResult(errorCode: 'DEVICE_UNAVAILABLE');
 
   @override
-  void cancelSession() { }
+  Future<void> cancelSession() async {}
 
   @override
-  bool isGateValid() => false;
-
-  @override
-  Map<String, String> diagnosticsSnapshot() => const {};
+  Future<bool> isGateValid() async => false;
 }

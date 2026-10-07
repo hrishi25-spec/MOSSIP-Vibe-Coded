@@ -19,5 +19,12 @@ public enum AuditEventType {
     PAD_BLOCKED,
     /** Runtime policy edit via PUT /api/v1/config/{workflowType} (no session). */
     CONFIG_CHANGED,
+    /**
+     * Model swap, refused update, or rollback (spec §10 — payload: old/new
+     * version, hash ok; emitted by {@code SignedManifestModelStore}, no
+     * session). {@code action} is {@code SWAP} or {@code ROLLBACK},
+     * {@code reason} names the failing check on a rollback.
+     */
+    MODEL_UPDATED,
     INTERNAL_ERROR
 }

@@ -257,9 +257,64 @@ mirrors the Flutter `LivenessView.defaultMessages` catalogue string-for-string
 (a test parses the Dart source so the two cannot drift), and deployments swap
 in their own with `overlay.setMessageLookup(...)`. The FXML deliberately
 carries no `fx:controller`: the overlay loads itself as both root and
-controller (`FXMLLoader.setRoot(this)` + `setController(this)`). JavaFX is a
-`provided` dependency and is excluded from the service jar — the overlay runs
-inside the Registration Client host, never in the backend.
+controller (`FXMLLoader.setRoot(this)` + `setController(this)`). That only
+works because the document's root element is an `<fx:root>` element whose
+`type` names `javafx.scene.layout.StackPane`
+— with a concrete root element `FXMLLoader` insists on building the root
+itself and rejects the instance handed to `setRoot`. JavaFX is a `provided`
+dependency and is excluded from the service jar — the overlay runs inside the
+Registration Client host, never in the backend.
+
+The overlay is covered by a headless render test
+(`LivenessChallengeOverlaySmokeTest`) that instantiates the real FXML on
+Monocle's headless glass platform and asserts the card each orchestrator state
+renders, so its wiring can be checked without a display, a camera or a JavaFX
+host.
+
+### 3.7 The overlay without the in-process orchestrator
+
+The overlay is not tied to the on-device orchestrator: the REST path emits the
+same `LivenessStateEvent` / `LivenessFinalResult` pair, so the same overlay
+renders whether the gate runs in-process or through this service.
+
+```java
+DesktopLivenessAdapter adapter = new DesktopLivenessAdapter(
+    () -> livenessConfig.getClient(), () -> "RESIDENT", () -> currentDeviceId);
+
+LivenessChallengeOverlay overlay = new LivenessChallengeOverlay();
+captureStack.getChildren().add(overlay);
+adapter.setListener(overlay.asListener());   // REST responses → the same states
+overlay.setOnRetry(adapter::startSession);   // retry restarts the gate: a fresh session
+overlay.setOnCancel(adapter::stopSession);   // cancel renders the ABORTED outcome
+
+adapter.startSession();                      // renders the warm-up, then frames:
+streamer.setFrameListener(adapter::onFrame);
+```
+
+`ServiceLivenessEventMapper` is the whole translation, and it is a pure
+function of one response plus the session's frozen policy, so the mapping is
+tested without a server. Four things are worth knowing when reading its table:
+
+- The client renders **catalogue keys**, never the service's `message` text —
+the English prose in the responses is for logs and audit.
+- The challenge counter (`Challenge 1 / N`) and the attempt budget come from the
+policy the service froze on the session at creation and returns from
+`POST /api/v1/sessions`; without it (a legacy session) the counter is simply
+not drawn rather than guessed.
+- Re-served challenges do not advance the counter: while a challenge is open
+the service answers every frame with the same `escalate_to_active`, and only a
+new challenge id means a new step.
+- A `reject` is retryable — Retry restarts the gate with a fresh session, which
+is exactly what the design's retry rule says. Recovery guidance (no retry)
+comes from the budget-exhausted vocabulary (`locked` / `escalate_to_operator` /
+`failed`), or from a `reject` whose closed session reports
+`max_retries_exceeded`.
+
+Transport failures do not have one answer: `startSession` propagates
+`LivenessClientException` (the host has not shown a capture screen yet and the
+error table in section 6 applies), while `onFrame` / `submitChallenge` translate
+it into the recoverable `DEVICE_ERROR` state and leave the session open for the
+next frame.
 
 ---
 

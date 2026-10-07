@@ -31,6 +31,16 @@ public class OperationalMetrics {
     private Double padRejectionRate;
 
     /**
+     * Per-species APCER (Attack Presentation Classification Error Rate):
+     * proportion of attack presentations classified as bona fide.
+     * Values in [0,1]; higher means more vulnerable to that attack type.
+     */
+    private Double printPhotoApcer;
+    private Double screenReplayApcer;
+    private Double videoReplayApcer;
+    private Double otherApcer;
+
+    /**
      * Rate-limiter tallies since process start (in-memory, so they reset on
      * restart — unlike the session counters above, which come from the
      * database). A non-zero {@code rateLimitedRequests} means callers are being

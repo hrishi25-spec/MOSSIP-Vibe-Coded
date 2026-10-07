@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
+import javax.net.ssl.SSLContext;
 
 /**
  * HTTP client implementation of {@link LivenessClient}.
@@ -33,6 +34,9 @@ import java.util.UUID;
  *   LivenessClient client = new LivenessHttpClient("http://10.0.2.2:8000");
  *   // Feed results back to Dart via Pigeon response objects
  * </pre>
+ *
+ * <p>For environments requiring custom TLS configuration (e.g., certificate pinning),
+ * use the {@link #LivenessHttpClient(String, SSLContext)} overload.</p>
  */
 public class LivenessHttpClient implements LivenessClient {
 
@@ -40,9 +44,25 @@ public class LivenessHttpClient implements LivenessClient {
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
 
+    /** Creates an instance with default JDK TLS settings. */
     public LivenessHttpClient(String baseUrl) {
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         this.httpClient = HttpClient.newHttpClient();
+        this.objectMapper = new ObjectMapper();
+    }
+
+    /**
+     * Creates an instance with the provided {@code SSLContext}, allowing custom
+     * trust stores, certificate pinning, or other TLS adjustments.
+     *
+     * @param baseUrl   the base URL of the liveness service (trailing slash optional)
+     * @param sslContext the SSLContext to use for HTTPS connections
+     */
+    public LivenessHttpClient(String baseUrl, SSLContext sslContext) {
+        this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+        this.httpClient = HttpClient.newBuilder()
+                .sslContext(sslContext)
+                .build();
         this.objectMapper = new ObjectMapper();
     }
 
@@ -59,13 +79,7 @@ public class LivenessHttpClient implements LivenessClient {
                     .build();
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            JsonNode json = objectMapper.readTree(response.body());
-
-            return new SessionInfo(
-                    UUID.fromString(json.get("id").asText()),
-                    json.get("workflowType").asText(),
-                    json.get("status").asText()
-            );
+            return parseSessionInfo(objectMapper.readTree(response.body()));
         } catch (IOException | InterruptedException e) {
             throw new LivenessClientException("Failed to create session", e);
         }
@@ -143,16 +157,7 @@ public class LivenessHttpClient implements LivenessClient {
                     .build();
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            JsonNode json = objectMapper.readTree(response.body());
-
-            return new ChallengeResult(
-                    sessionId,
-                    json.has("challenge") && json.get("challenge").has("id")
-                            ? json.get("challenge").get("id").asText() : null,
-                    json.get("passed").asBoolean(),
-                    json.get("action").asText(),
-                    json.get("message").asText()
-            );
+            return parseChallengeResult(sessionId, objectMapper.readTree(response.body()));
         } catch (IOException | InterruptedException e) {
             throw new LivenessClientException("Failed to validate challenge", e);
         }
@@ -179,19 +184,38 @@ public class LivenessHttpClient implements LivenessClient {
     }
 
     // ---- JSON parsing helpers ----
+    //
+    // Package-private and static: the response shapes are the part of this client
+    // worth pinning in a test, and they can be pinned from a JSON literal without
+    // standing up a server.
 
-    private FrameResult parseFrameResult(JsonNode json) {
-        String challengeId = null, challengeType = null;
-        Integer timeoutMs = null, attemptNumber = null;
+    static SessionInfo parseSessionInfo(JsonNode json) {
+        return new SessionInfo(
+                UUID.fromString(json.get("id").asText()),
+                json.get("workflowType").asText(),
+                json.get("status").asText(),
+                parsePolicy(json.get("policy"))
+        );
+    }
 
-        if (json.has("challenge") && json.get("challenge") != null && !json.get("challenge").isNull()) {
-            JsonNode ch = json.get("challenge");
-            challengeId = ch.has("challengeId") ? ch.get("challengeId").asText() : null;
-            challengeType = ch.has("challengeType") ? ch.get("challengeType").asText() : null;
-            timeoutMs = ch.has("timeoutMs") ? ch.get("timeoutMs").asInt() : null;
-            attemptNumber = ch.has("attemptNumber") ? ch.get("attemptNumber").asInt() : null;
+    /**
+     * The frozen policy is {@code null} on legacy sessions; every field is read
+     * defensively so a policy that later grows cannot break an older client.
+     */
+    static Policy parsePolicy(JsonNode policy) {
+        if (policy == null || policy.isNull() || !policy.isObject()) {
+            return null;
         }
+        return new Policy(
+                policy.has("minChallengeCount") ? policy.get("minChallengeCount").asInt() : 0,
+                policy.has("maxRetries") ? policy.get("maxRetries").asInt() : 0,
+                policy.has("challengeTimeoutMs") ? policy.get("challengeTimeoutMs").asLong() : 0L,
+                policy.has("onRepeatedFailure") && !policy.get("onRepeatedFailure").isNull()
+                        ? policy.get("onRepeatedFailure").asText() : null
+        );
+    }
 
+    static FrameResult parseFrameResult(JsonNode json) {
         return new FrameResult(
                 UUID.fromString(json.get("sessionId").asText()),
                 json.get("stage").asText(),
@@ -202,14 +226,55 @@ public class LivenessHttpClient implements LivenessClient {
                 json.has("livenessScore") && !json.get("livenessScore").isNull()
                         ? json.get("livenessScore").asDouble() : null,
                 json.has("padFlag") && json.get("padFlag").asBoolean(),
-                json.has("padAttackType") ? json.get("padAttackType").asText() : null,
+                json.has("padAttackType") && !json.get("padAttackType").isNull()
+                        ? json.get("padAttackType").asText() : null,
                 json.get("action").asText(),
-                challengeId,
-                challengeType,
-                timeoutMs,
-                attemptNumber,
-                json.has("message") ? json.get("message").asText() : null
+                parseChallenge(json.get("challenge")),
+                json.has("message") && !json.get("message").isNull()
+                        ? json.get("message").asText() : null
         );
+    }
+
+    static ChallengeResult parseChallengeResult(UUID sessionId, JsonNode json) {
+        return new ChallengeResult(
+                sessionId,
+                json.has("passed") && json.get("passed").asBoolean(),
+                json.get("action").asText(),
+                json.has("message") && !json.get("message").isNull()
+                        ? json.get("message").asText() : null,
+                parseChallenge(json.get("challenge"))
+        );
+    }
+
+    /**
+     * The nested challenge object, or {@code null} when the response carries none.
+     * Frame responses name the id {@code challengeId} and validation responses
+     * ({@code ChallengeResponse}) name it {@code id}; both are accepted here so the
+     * client does not depend on which endpoint produced the object.
+     */
+    static Challenge parseChallenge(JsonNode challenge) {
+        if (challenge == null || challenge.isNull() || !challenge.isObject()) {
+            return null;
+        }
+        return new Challenge(
+                text(challenge, "challengeId", "id"),
+                text(challenge, "challengeType"),
+                integer(challenge, "timeoutMs"),
+                integer(challenge, "attemptNumber")
+        );
+    }
+
+    private static String text(JsonNode node, String... names) {
+        for (String name : names) {
+            if (node.has(name) && !node.get(name).isNull() && !node.get(name).asText().isEmpty()) {
+                return node.get(name).asText();
+            }
+        }
+        return null;
+    }
+
+    private static Integer integer(JsonNode node, String name) {
+        return node.has(name) && !node.get(name).isNull() ? node.get(name).asInt() : null;
     }
 
     // ---- Internal request body records ----

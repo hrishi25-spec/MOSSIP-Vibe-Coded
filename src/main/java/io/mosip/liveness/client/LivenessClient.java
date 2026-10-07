@@ -77,7 +77,32 @@ public interface LivenessClient {
     record SessionInfo(
             UUID id,
             String workflowType,
-            String status
+            String status,
+            Policy policy           // null on sessions created before the policy was frozen
+    ) {}
+
+    /**
+     * The policy the service froze on the session at creation. The client reads it
+     * for the two things it cannot infer from the responses — how many challenges
+     * the session needs (the overlay's "Challenge 1 / N" counter) and how large the
+     * retry budget is — plus the repeated-failure action that decides the terminal
+     * outcome. Fields are 0/absent when the service did not signal them.
+     *
+     * @param onRepeatedFailure LOCK_OUT | FALLBACK | ESCALATE_TO_OPERATOR
+     */
+    record Policy(
+            int minChallengeCount,
+            int maxRetries,
+            long challengeTimeoutMs,
+            String onRepeatedFailure
+    ) {}
+
+    /** A challenge the service issued, as carried by frame and validation responses. */
+    record Challenge(
+            String challengeId,
+            String challengeType,   // BLINK | SMILE | TURN_HEAD_LEFT | TURN_HEAD_RIGHT | LOOK_DIRECTION
+            Integer timeoutMs,
+            Integer attemptNumber
     ) {}
 
     record FrameResult(
@@ -90,19 +115,17 @@ public interface LivenessClient {
             boolean padFlag,
             String padAttackType,
             String action,          // proceed | escalate_to_active | reject | retry_passive
-            String challengeId,     // non-null when action == escalate_to_active
-            String challengeType,   // BLINK | SMILE | TURN_LEFT | TURN_RIGHT | LOOK_DIRECTION
-            Integer timeoutMs,
-            Integer attemptNumber,
+                                    // | locked | escalate_to_operator | failed
+            Challenge challenge,    // non-null when action == escalate_to_active
             String message
     ) {}
 
     record ChallengeResult(
             UUID sessionId,
-            String challengeId,
             boolean passed,
-            String action,          // proceed | retry_challenge | reject
-            String message
+            String action,          // proceed | retry_challenge | continue | reject
+            String message,
+            Challenge challenge     // the next challenge when the service issued one, else null
     ) {}
 
     record SessionSummary(

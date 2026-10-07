@@ -329,7 +329,8 @@ Session trails query by session id, so they can never pick one up. See
 standalone engine's structured logger — *not* by the HTTP API:
 `SESSION_STARTED`, `SESSION_CLOSED`, `SESSION_ABORTED`, `FRAME_REJECTED`, `FRAME_SCORED`,
 `PASSIVE_PASSED`, `LIVENESS_FAILED`, `ESCALATED_TO_ACTIVE`, `CHALLENGE_TIMEOUT`,
-`MAX_RETRIES_EXCEEDED`, `REPEATED_FAILURE_ACTION`, `PAD_BLOCKED`, `INTERNAL_ERROR`.
+`MAX_RETRIES_EXCEEDED`, `REPEATED_FAILURE_ACTION`, `PAD_BLOCKED`, `MODEL_UPDATED`,
+`INTERNAL_ERROR`.
 
 ### Error Response Format
 All errors return:
@@ -395,6 +396,11 @@ score = PassiveScoringService.score(frame, observation, imageUtils)
         │   probability via OnnxMiniFasNetBackend (checksum-verified model),
         │   falling back to the heuristic below if the model cannot analyse
         │   the frame (or fails to load)
+        ├─ mosip.liveness.backend = <explicit id> (mock | onnx-minifasnet-v2 |
+        │   mediapipe-facemesh | tflite-minifasnet): that SPI backend scores
+        │   this path AND the engine's SPI bean — one key, both wirings;
+        │   unavailable = coded fail-closed error, never a silent fallback
+        │   (interop report F5)
         └─ mosip.liveness.backend = heuristic: quality formula
             faceQuality = 0.5 × sharpness + 0.5 × brightness
             sharpness   = min(1, LaplacianVariance / 500)

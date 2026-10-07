@@ -1,8 +1,11 @@
 package io.mosip.liveness.services;
 
+import io.mosip.liveness.backend.LivenessBackend;
+import io.mosip.liveness.backend.LivenessBackendSelection;
 import io.mosip.liveness.backend.OnnxMiniFasNetBackend;
 import io.mosip.liveness.core.FaceSignals;
 import io.mosip.liveness.core.Frame;
+import io.mosip.liveness.core.LivenessErrorCode;
 import io.mosip.liveness.core.LivenessException;
 import io.mosip.liveness.core.PadVerdict;
 import io.mosip.liveness.metrics.PipelineTimers;
@@ -33,9 +36,14 @@ import java.util.Optional;
  *       today's behaviour instead of failing startup.</li>
  * </ul>
  *
- * <p>Configured by {@code mosip.liveness.backend} ({@code auto|heuristic}) and
- * {@code mosip.liveness.model-path} (optional filesystem override of the
- * bundled classpath model).</p>
+ * <p>Configured by {@code mosip.liveness.backend} — the single selection key
+ * shared with the SPI bean (interop report F5): {@code auto|heuristic} as
+ * above, or an explicit backend id ({@code mock},
+ * {@code onnx-minifasnet-v2}, {@code mediapipe-facemesh},
+ * {@code tflite-minifasnet}). Explicit ids are strict — if the chosen backend
+ * cannot load, scoring fails closed with a coded error instead of silently
+ * scoring with a different one. {@code mosip.liveness.model-path} optionally
+ * overrides the bundled classpath model (ONNX selections only).</p>
  *
  * <p><b>Nothing loads at construction.</b> The OpenCV natives (~6 s of
  * extraction) and the ONNX model used to load in the constructor, which made
@@ -56,11 +64,14 @@ public class PassiveScoringService {
 
     private final LivenessEngineService heuristicScorer;
     private final String requestedMode;
+    private final LivenessBackendSelection selection;
     private final String modelPath;
 
-    /** The resolved model backend; null until {@link #resolveScorer()} runs. */
-    private volatile OnnxMiniFasNetBackend model;
+    /** The resolved backend scorer; null when the heuristic is selected. */
+    private volatile LivenessBackend model;
     private volatile boolean modelAvailable;
+    /** Set when an explicit selection could not load — rethrown, never retried. */
+    private volatile RuntimeException resolutionFailure;
     /** Volatile so the per-frame fast path can skip the monitor entirely. */
     private volatile boolean resolved;
 
@@ -69,6 +80,7 @@ public class PassiveScoringService {
                                  @Value("${mosip.liveness.model-path:}") String modelPath) {
         this.heuristicScorer = heuristicScorer;
         this.requestedMode = mode;
+        this.selection = LivenessBackendSelection.parse(mode);  // unknown value fails at bean creation
         this.modelPath = modelPath;
         // Deliberately loads nothing here: bean creation must stay cheap,
         // and bean order is not guaranteed, so a constructor load would
@@ -89,40 +101,98 @@ public class PassiveScoringService {
      */
     private void resolveScorer() {
         if (resolved) {
+            if (resolutionFailure != null) {
+                throw resolutionFailure;          // one-shot: never re-pay the load
+            }
             return;
         }
         synchronized (this) {
             if (resolved) {
+                if (resolutionFailure != null) {
+                    throw resolutionFailure;
+                }
                 return;
             }
-            // The native library is the one hard dependency: the model
-            // backend builds a Haar cascade, and without the natives that
-            // is an UnsatisfiedLinkError. AppConfig's guard makes the load
-            // idempotent JVM-wide, so this stays the service's only OpenCV
-            // entry point, and it blocks only if the background warm-up
-            // has not settled yet.
-            boolean opencvReady = io.mosip.liveness.app.config.AppConfig.ensureOpenCvLoaded();
-
-            OnnxMiniFasNetBackend candidate = null;
-            if (!opencvReady) {
-                log.warn("OpenCV natives unavailable; not attempting to load the liveness model");
-            } else if (MODE_HEURISTIC.equalsIgnoreCase(String.valueOf(requestedMode).trim())) {
-                log.info("Passive liveness model disabled by config (mosip.liveness.backend={})", requestedMode);
-            } else {
-                candidate = tryLoadModel(modelPath);
+            try {
+                this.model = openSelectedBackend();
+                this.modelAvailable = model != null;
+                this.resolved = true;
+                log.info("Passive liveness scorer: {} (requested mode '{}')",
+                        modelAvailable ? model.id() : "opencv-heuristic", requestedMode);
+            } catch (RuntimeException e) {
+                // An explicit backend that cannot load is a configuration
+                // error, not a licence to score with a different one: cache
+                // the failure so every later call fails closed the same way.
+                this.resolutionFailure = e;
+                this.resolved = true;
+                throw e;
             }
-            this.model = candidate;
-            this.modelAvailable = candidate != null && candidate.isReady();
-            this.resolved = true;
-            log.info("Passive liveness scorer: {} (requested mode '{}')",
-                    modelAvailable ? model.id() : "opencv-heuristic", requestedMode);
         }
     }
 
-    private OnnxMiniFasNetBackend tryLoadModel(String modelPath) {
+    /**
+     * Builds whatever the selection names, exactly once. {@code auto} and
+     * {@code heuristic} keep today's degrade-to-the-heuristic behaviour; an
+     * explicit id either loads that backend or throws a coded
+     * {@link LivenessException} naming the key and the cause.
+     */
+    private LivenessBackend openSelectedBackend() {
+        // The native library is the one hard dependency: the model
+        // backend builds a Haar cascade, and without the natives that
+        // is an UnsatisfiedLinkError. AppConfig's guard makes the load
+        // idempotent JVM-wide, so this stays the service's only OpenCV
+        // entry point, and it blocks only if the background warm-up
+        // has not settled yet.
+        boolean opencvReady = io.mosip.liveness.app.config.AppConfig.ensureOpenCvLoaded();
+
+        switch (selection) {
+            case HEURISTIC:
+                log.info("Passive liveness model disabled by config (mosip.liveness.backend={})",
+                        requestedMode);
+                return null;
+            case AUTO:
+                if (!opencvReady) {
+                    log.warn("OpenCV natives unavailable; not attempting to load the liveness model");
+                    return null;
+                }
+                return loadOnnx(true);           // auto: degrade to the heuristic
+            case ONNX_MINIFASNET_V2:
+                if (!opencvReady) {
+                    throw unavailable("OpenCV natives could not be loaded");
+                }
+                return loadOnnx(false);          // explicit: no heuristic escape hatch
+            default:
+                // mock / mediapipe-facemesh / tflite-minifasnet: scored through
+                // the SPI itself. model-path applies to ONNX selections only.
+                if (!opencvReady) {
+                    throw unavailable("OpenCV natives could not be loaded");
+                }
+                LivenessBackend backend = selection.createBackend();
+                try {
+                    backend.initialize(Map.of());
+                } catch (LivenessException e) {
+                    throw new LivenessException(LivenessErrorCode.ENGINE_INTERNAL_ERROR,
+                            unavailablePrefix() + e.getMessage(), e);
+                } catch (Throwable t) {
+                    throw new LivenessException(LivenessErrorCode.ENGINE_INTERNAL_ERROR,
+                            unavailablePrefix() + t, t);
+                }
+                return backend;
+        }
+    }
+
+    /**
+     * ONNX loader shared by {@code auto} (fallback allowed — degrade to the
+     * heuristic) and the explicit {@code onnx-minifasnet-v2} selection
+     * (no fallback: a load failure becomes a coded refusal).
+     */
+    private LivenessBackend loadOnnx(boolean fallbackAllowed) {
         if (!OnnxMiniFasNetBackend.isRuntimeAvailable()) {
-            log.warn("ONNX Runtime is not on the classpath; falling back to the heuristic scorer");
-            return null;
+            if (fallbackAllowed) {
+                log.warn("ONNX Runtime is not on the classpath; falling back to the heuristic scorer");
+                return null;
+            }
+            throw unavailable("ONNX Runtime is not on the classpath");
         }
         try {
             OnnxMiniFasNetBackend backend = new OnnxMiniFasNetBackend();
@@ -133,20 +203,37 @@ public class PassiveScoringService {
             backend.initialize(options);
             return backend;
         } catch (LivenessException e) {
+            if (!fallbackAllowed) {
+                throw unavailable(e.getMessage());
+            }
             log.warn("Liveness model unavailable ({}); falling back to the heuristic scorer",
                     e.getMessage());
             return null;
         } catch (Throwable t) {
+            if (!fallbackAllowed) {
+                throw unavailable(t.toString());
+            }
             log.warn("Liveness model failed to load ({}); falling back to the heuristic scorer",
                     t.toString());
             return null;
         }
     }
 
+    private LivenessException unavailable(String why) {
+        return new LivenessException(LivenessErrorCode.ENGINE_INTERNAL_ERROR,
+                unavailablePrefix() + why);
+    }
+
+    private String unavailablePrefix() {
+        return "mosip.liveness.backend=" + selection.configValue()
+                + " selected explicitly but unavailable: ";
+    }
+
     /**
-     * True when the MiniFASNet model is loaded and producing real liveness
-     * confidences. Triggers the one-time resolution, so the first call may
-     * block on the native load and the model.
+     * True when a configured backend scorer (not the heuristic) is active —
+     * the MiniFASNet model under {@code auto}, or whichever backend the key
+     * names. Triggers the one-time resolution, so the first call may block
+     * on the native load and the model.
      */
     public boolean isModelAvailable() {
         resolveScorer();

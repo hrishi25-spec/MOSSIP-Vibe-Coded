@@ -1,7 +1,7 @@
 # Dart liveness layer
 
 - `pigeon/liveness.dart` (repo root `android_client/pigeon/`) — Pigeon API;
-  regenerate with `dart run pigeon --input pigeon/liveness.dart`.
+  regenerate both checked-in bindings with `./tool/generate_pigeon.sh`.
 - `liveness_view_model.dart` — `ChangeNotifier` mirroring the native
   orchestrator state machine; exposes `captureEnabled` (PASSED + valid gate).
 - `liveness_view.dart` — widget rendering preview, oval overlay, challenge
@@ -10,13 +10,13 @@
 Wire-up sketch (resident capture screen):
 
 ```dart
-final vm = LivenessViewModel();
-// after Pigeon registration in the Android embedding:
-vm.bindFlutterApi(livenessFlutterApi);
+final vm = LivenessViewModel(hostApi: PigeonLivenessHost());
+// Register the generated callback receiver for this screen.
+vm.bindFlutterApi();
 
 LivenessView(
   viewModel: vm,
-  onRetry: () => vm.startSession(LivenessRole.RESIDENT),
+  onRetry: () => vm.startSession(LivenessRole.resident),
   onCancel: () => vm.cancelSession(),
 );
 
@@ -27,5 +27,5 @@ onPressed: vm.captureEnabled && await vm.ensureGateValidForCapture()
 ```
 
 Operator / supervisor login dialogs reuse the same widget with
-`LivenessRole.OPERATOR` / `LivenessRole.SUPERVISOR` (analyse.md §6.2/§6.3: supervisor
+`LivenessRole.operator` / `LivenessRole.supervisor` (analyse.md §6.2/§6.3: supervisor
 policy is stricter by default — higher threshold, two challenges).

@@ -51,8 +51,11 @@ jobs:
 
       # Tests are self-contained: the JPA slice swaps in embedded H2, OpenCV
       # natives and the ONNX model ship inside the dependency jars, so no
-      # database or external service is needed on the runner. The single
-      # quotes keep the surefire '!' exclusion literal for the shell.
+      # database or external service is needed on the runner. The desktop
+      # overlay's smoke test is self-contained in the same way: surefire pins
+      # JavaFX to Monocle's headless glass platform, so it renders cards
+      # without a display, a window system or a GPU. The single quotes keep
+      # the surefire '!' exclusion literal for the shell.
       - name: Run ${{ matrix.suite }} tests
         run: ./mvnw --batch-mode test -Dtest='${{ matrix.maven_tests }}'
 
@@ -74,9 +77,82 @@ jobs:
       - name: Run the console guard tests
         run: node src/test/js/console-guards.test.mjs
 
-  # Packages the executable jars, but only after the suites passed (needs: test
-  # waits for every matrix leg, and console waits for the DOM guards), so a red
-  # build never publishes an artifact.
+  python-backend:
+    name: Python liveness backend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: pad_liveness_backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12.15
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.15'
+          cache: pip
+          cache-dependency-path: |
+            pad_liveness_backend/requirements.txt
+            pad_liveness_backend/requirements-dev.txt
+
+      - name: Install backend and test dependencies
+        run: python -m pip install --requirement requirements-dev.txt
+
+      - name: Run backend behavior tests
+        run: python -m pytest --quiet
+
+  android-client:
+    name: Android/Flutter client build
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: android_client
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install pinned Android SDK packages
+        run: sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;25.1.8937393"
+
+      - name: Set up Flutter 3.10.4 (Dart 3.0.3)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.10.4'
+          cache: true
+
+      - name: Resolve locked Dart dependencies
+        run: flutter pub get --enforce-lockfile
+
+      - name: Regenerate Pigeon bindings
+        run: ./tool/generate_pigeon.sh
+
+      - name: Verify generated bindings are current
+        run: git diff --exit-code -- lib/pigeon/liveness.dart android/app/src/main/java/io/mosip/registration/liveness/pigeon/Liveness.java
+
+      - name: Check Dart formatting and analyze
+        run: |
+          dart format --output=none --set-exit-if-changed lib pigeon
+          flutter analyze
+
+      - name: Build Android debug APK
+        run: flutter build apk --debug
+
+  # Packages the executable jars only after the Java suites, console guards,
+  # and Python backend behavior tests pass, so a red check never publishes an
+  # artifact.
   #
   # Two legs, in parallel. The full jar is the deployable artifact — natives
   # for every platform. The slim jar is the same application with only the
@@ -93,7 +169,7 @@ jobs:
     name: Package ${{ matrix.artifact }} jar
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    needs: [test, console]
+    needs: [test, console, python-backend]
     strategy:
       # Both legs run to completion — one packaging path failing must not hide
       # the other's result.
@@ -218,7 +294,7 @@ jobs:
     name: Docker image
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: test
+    needs: [test, python-backend]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -264,7 +340,7 @@ jobs:
     name: Cold boot time (median)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [test, console]
+    needs: [test, console, python-backend]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -336,7 +412,7 @@ jobs:
     runs-on: ubuntu-latest
     # Two full builds plus two boots, so double the package job's budget.
     timeout-minutes: 30
-    needs: test
+    needs: [test, python-backend]
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     # Scoped to this job alone: the rest of the workflow stays read-only.
     permissions:

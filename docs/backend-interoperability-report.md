@@ -3,11 +3,11 @@
 | Field | Value |
 |---|---|
 | **Document** | Backend interoperability report (`LivenessBackend` SPI) |
-| **Date** | 2026-10-06 |
+| **Date** | 2026-10-06 (per-frame latency added 2026-10-07) |
 | **Branch** | `development` (working tree, uncommitted) |
 | **Scope** | `MockLivenessBackend`, `OnnxMiniFasNetBackend`, `MediaPipeFaceMeshBackend` |
 | **Excluded** | `TfLiteMiniFasNetBackend` (a fourth implementation exists; not in the requested comparison set) |
-| **Method** | Static conformance review + dynamic execution of the full Maven test suite |
+| **Method** | Static conformance review + dynamic execution of the full Maven test suite + per-frame latency/throughput measurement of both executable backends (section 10) |
 | **Suite baseline** | `./mvnw test` → **439 tests, 0 failures, 0 errors, 0 skipped (exit 0)** |
 | **Status** | Final — figures below are measured, not projected |
 
@@ -161,9 +161,16 @@ disambiguates via the stable ids (pinned by
 (`PassiveScoringService`, `mosip.liveness.backend = auto|heuristic`) uses
 ONNX directly with heuristic fallback, while the SPI bean
 (`AppConfig.livenessBackend()`) is the mock, consumed by engine/embedding
-callers and injectable into the eval harness. The suite exercises both (6 +
-55 tests respectively), but a future backend selection config should cover
+callers and injectable into the eval harness.The suite exercises both (6 + 55 tests respectively), but a future backend selection config should cover
 both, not just one.
+
+*Resolved 2026-10-07:* `mosip.liveness.backend` is now that single key.
+`auto`/`heuristic` keep both paths exactly as they were, and explicit backend
+ids (`mock`, `onnx-minifasnet-v2`, `mediapipe-facemesh`, `tflite-minifasnet`)
+move both together through one vocabulary (`LivenessBackendSelection`),
+refusing to fall back to another scorer when an explicit id cannot load.
+`LivenessBackendSelectionTest` pins the shared vocabulary and the SPI bean,
+`PassiveScoringServiceTest` the service side (9 tests).
 
 **F6 — Suite totals are dominated by backend-independent logic.** 356 of 439
 tests never touch a backend — the 13 decision-logic tests plus the 343-test
@@ -171,6 +178,16 @@ remainder (API, audit chain, device, config, diagnostics).
 Backend behaviour is concentrated in the 83 attributed tests, so a regression
 in any backend shows up in a small, well-identified set of suites — the
 report's attribution table doubles as the watch-list.
+
+**F7 — Per-frame cost at the seam is measured, and it is all in the
+implementations (2026-10-07).** One SPI conversation on the genuine-face
+fixture costs the mock **0.017 ms** and ONNX **156.8 ms** mean (section 10):
+the interface itself adds nothing, and ONNX's three near-equal phases expose
+that each probability call re-runs detection internally — one frame, three
+Haar cascades, two inferences. Single-threaded ONNX throughput (**6.4 fps**
+on the test host) sits under the 10–15 fps analysis budget, so camera-rate
+deployment depends on removing that duplication or parallelising scoring —
+not on anything at the seam.
 
 ## 8. Limitations
 
@@ -186,9 +203,11 @@ report's attribution table doubles as the watch-list.
    report says nothing about it.
 3. **Static findings F4/F5** are code-reading conclusions (cited lines), not
    measurements; the dynamic findings are all traceable to named tests.
-4. Figures reflect one run on one host (Linux x86_64, Java 17); model timing
-   characteristics are out of scope for interoperability and live in
-   `docs/status-report.md` §4.
+4. Figures reflect one run on one host (Linux x86_64, Java 17); the timing in
+   section 10 likewise reflects that host and a single 100-frame run of one
+   fixture — a latency microbenchmark, not a device or camera-rate study.
+   End-to-end/device timing remains out of scope for interoperability and
+   lives in `docs/status-report.md` §4.
 
 ## 9. Recommendations
 
@@ -196,10 +215,66 @@ report's attribution table doubles as the watch-list.
    must be added to the `backends()` stream; the contract runs unchanged.
 2. When TFLite support is ever enabled, re-run this report — the MediaPipe
    columns in §5 and §6 should convert to ✅ with inference evidence.
-3. If a backend-selection config is introduced (F5), extend the interop test
-   to construct the engine through that selection path as well.
+3. ~~If a backend-selection config is introduced (F5), extend the interop test
+   to construct the engine through that selection path as well.~~ *Done
+   2026-10-07: `theBackendSelectionConfigBuildsTheEngineThroughTheSameContract`
+   constructs the engine via the selection for every selectable id.*
 4. Keep the id-pinning test and this report in lockstep: renaming a backend
    id is a report update, not a silent change.
+
+## 10. Measured per-frame latency and throughput (2026-10-07)
+
+Interop is about the seam; deployments care what a frame costs at it.
+`BackendPerFrameLatencyTest` feeds both executable backends the **same
+representative input** — the genuine-face fixture
+(`src/test/resources/fixtures/real-face.jpg`, 256×320) — through one full SPI
+conversation **in engine order** (`analyzeFrame` → `assessPad` →
+`scorePassiveLiveness`), single-threaded, image decode excluded (the frame is
+built once): 10 warm-up frames (JIT, ORT session, cascade caches) then **100
+measured frames** per backend. Host: Linux x86_64, 4 × Intel Core i3-1005G1
+@ 1.20 GHz, OpenJDK 17.0.20.1, ONNX Runtime 1.24.2 (CPU execution provider),
+OpenCV natives loaded locally. One run, one host; raw output is
+`target/backend-latency-results.txt` and Appendix A reproduces it.
+
+| Backend | Phase means (ms) | Frame mean | p50 | p95 | max | Throughput |
+|---|---|---|---|---|---|---|
+| `mock` | analyze 0.012 · pad 0.001 · score 0.005 | **0.017 ms** | 0.013 | 0.037 | 0.105 | **≈59,515 fps** |
+| `onnx-minifasnet-v2` | analyze 46.680 · pad 54.386 · score 55.702 | **156.768 ms** | 148.039 | 206.396 | 309.050 | **6.4 fps** |
+
+Percentiles are nearest-rank over the 100 frames; throughput is the
+sequential single-threaded rate implied by the mean frame time. Score ranges
+across the measured frames: mock `[0.9203, 0.9397]` (seeded noise around the
+scripted verdict), ONNX `[0.9950, 0.9950]` — the genuine face classified live
+on every frame, in line with `OnnxMiniFasNetBackendTest`'s > 0.7 pin.
+
+What the numbers say:
+
+- **The seam itself is free; the implementations carry all the cost.** The
+  identical conversation scripted costs 0.017 ms — roughly 9,000× under
+  ONNX. Interoperability overhead at the interface is unmeasurable.
+- **ONNX pays triple detection per frame, at the seam and not only in the
+  HTTP path.** `analyzeFrame` runs the Haar cascade (~46.7 ms), and both
+  `scorePassiveLiveness` and `assessPad` independently call
+  `probabilitiesFor(frame)` (`OnnxMiniFasNetBackend` lines 503 and 513),
+  each re-running detect + crop + inference (~54–56 ms apiece). One
+  qualifying frame costs three cascades and two inferences; the phases are
+  too even for anything else to be true, and it corroborates the
+  duplicate-work finding the HTTP stage timers produced.
+- **6.4 fps single-threaded sits under the 10–15 fps analysis budget.** On
+  this host, camera-rate scoring needs the duplicate detection removed
+  (reuse the crop/signals for both probability calls) and/or parallel
+  scoring. The mock numbers show neither the SPI nor the harness adds
+  measurable overhead to that budget.
+
+Caveats: the same fixture frame repeats 100× (a latency microbenchmark —
+Haar and ORT cost are content- and resolution-dependent, so other inputs
+will differ); JPEG decode, session management and the engine layer are
+outside these numbers; **run-to-run variance is real** — a repeat during the
+full-suite run measured ONNX at 172.1 ms mean / 5.8 fps (same shape and
+phase ordering, ~10% higher) and mock at 0.005 ms / ≈218,830 fps (whose
+absolute figure is dominated by host cache/turbo state, not backend logic);
+and MediaPipe has none, because it remains non-executable in this build
+(see §8).
 
 ### Appendix A — Reproduction
 
@@ -217,4 +292,8 @@ report's attribution table doubles as the watch-list.
 # Per-suite counts (as used in §6)
 awk 'match($0,/tests="[0-9]+"/){print FILENAME": "substr($0,RSTART+7,RLENGTH-8)}' \
     target/surefire-reports/TEST-*.xml
+
+# Per-frame latency + throughput for the mock and ONNX backends (section 10)
+./mvnw test -Dtest='BackendPerFrameLatencyTest'
+cat target/backend-latency-results.txt
 ```

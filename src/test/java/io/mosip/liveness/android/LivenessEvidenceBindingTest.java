@@ -61,7 +61,7 @@ class LivenessEvidenceBindingTest {
                 AndroidOrchestratorSupport.engine(backend), backend,
                 AndroidOrchestratorSupport.policyProvider(),
                 AuditLogger.noop(), null, evidenceSigner, null, modelStore,
-                new AndroidOrchestratorSupport.DirectExecutorService());
+                new AndroidOrchestratorSupport.DirectExecutorService(), false);
     }
 
     @AfterEach
@@ -249,7 +249,7 @@ class LivenessEvidenceBindingTest {
                 AndroidOrchestratorSupport.engine(backend), backend,
                 AndroidOrchestratorSupport.policyProvider(), AuditLogger.noop(), clock,
                 evidenceSigner, null, modelStore,
-                new AndroidOrchestratorSupport.DirectExecutorService());
+                new AndroidOrchestratorSupport.DirectExecutorService(), false);
         try {
             AndroidOrchestratorSupport.RecordingListener listener =
                     new AndroidOrchestratorSupport.RecordingListener();

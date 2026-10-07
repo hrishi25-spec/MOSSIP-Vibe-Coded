@@ -232,9 +232,116 @@ an active challenge.
 
 ## Service knobs (`application.yml`, `mosip.liveness.*`)
 
+## Required environment variables
+
+The application reads several environment variables for configuration. Secret values must be provided via secure mechanisms (e.g., Docker secrets, Kubernetes secrets, CI/CD masked variables) and **never** hard-coded in image or version control.
+
+| Variable | Required? | Secret? | Description |
+|----------|-----------|---------|-------------|
+| `POSTGRES_USER` | no (defaults to `mosip`) | no | PostgreSQL username |
+| `POSTGRES_PASSWORD` | **yes** | **yes** | PostgreSQL password |
+| `POSTGRES_DB` | no (defaults to `pad_liveness`) | no | PostgreSQL database name |
+| `POSTGRES_HOST` | no (defaults to `localhost`) | no | PostgreSQL host |
+| `POSTGRES_PORT` | no (defaults to `5432`) | no | PostgreSQL port |
+| `MOSIP_ADMIN_API_KEY` | **yes** (for config updates via `PUT /api/v1/config/*`) | **yes** | Admin API key; generate with `openssl rand -hex 32` |
+| `MOSIP_AUDIT_HMAC_SECRET` | **yes** (recommended for tamper‑evident audit chain) | **yes** | Secret for HMAC‑SHA‑256 audit chain; minimum 16 characters |
+| `MOSIP_AUDIT_HMAC_PREVIOUS_SECRET` | no | **yes** | Previous audit HMAC secret for key rotation; must differ from current |
+| `SERVER_PORT` | no (defaults to `8000`) | no | HTTP server port |
+| `TOMCAT_THREADS_MAX` | no (defaults to `50`) | no | Maximum Tomcat threads |
+| `DB_POOL_SIZE` | no (defaults to `5`) | no | HikariCP maximum pool size |
+| `MAX_REQUEST_BODY_BYTES` | no (defaults to `25165824` = 24 MB) | no | Maximum HTTP request body size |
+| `RATE_LIMIT_ENABLED` | no (defaults to `true`) | no | Enable rate‑limiting filter |
+| `SESSION_CREATE_LIMIT` | no (defaults to `30`) | no | Session creations per IP per minute |
+| `FRAME_LIMIT` | no (defaults to `60`) | no | Frames + challenge validations per session per 10 s |
+| `TRUSTED_PROXIES` | no (defaults to empty) | no | Comma‑separated list of trusted proxies for rate‑limiting |
+| `MIN_CHALLENGE_WINDOW_MS` | no (defaults to `15000`) | no | Floor for per‑workflow challenge timeout (hard minimum 1000 ms) |
+| `LIVENESS_DIAGNOSTICS_ENABLED` | no (defaults to `false`) | no | Enable diagnostic mode (loopback only) |
+
+See `.env.example` in the repository root for a template.
+
+## Audit logging security
+
+The audit logging framework automatically replaces the values of any field keys that contain (case-insensitive) the substrings specified by the environment variable `AUDIT_REDACTION_KEYS` (a comma-separated list) with their SHA-256 hash. By default, the patterns are `"secret"`, `"key"`, `"token"`, `"password"`, and `"auth"`. For example, a call like `.field("apiToken", "abc123")` will store the value as a 64-character hexadecimal SHA-256 hash in the audit log, allowing later verification without storing the plaintext value.
+
+Operators can extend the list of sensitive key patterns without code changes by setting the `AUDIT_REDACTION_KEYS` environment variable, e.g.:
+```
+export AUDIT_REDACTION_KEYS="secret,key,token,password,auth,private,credential"
+```
+
+Developers should still audit their usage of `AuditEvent.field()` to ensure no sensitive data is inadvertently added as a field value, but the automatic hashing provides an additional safety net while still allowing audit trail verification.
+
+### Providing secrets securely
+
+#### Docker Compose (development)
+
+```yaml
+services:
+  api:
+    # ...
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+      MOSIP_ADMIN_API_KEY_FILE: /run/secrets/admin-api-key
+      MOSIP_AUDIT_HMAC_SECRET_FILE: /run/secrets/audit-hmac-secret
+    secrets:
+      - postgres-password
+      - admin-api-key
+      - audit-hmac-secret
+
+secrets:
+  postgres-password:
+    file: ./secrets/postgres-password.txt
+  admin-api-key:
+    file: ./secrets/admin-api-key.txt
+  audit-hmac-secret:
+    file: ./secrets/audit-hmac-secret.txt
+```
+
+#### Kubernetes (production)
+
+Create secrets:
+
+```bash
+kubectl create secret generic db-credentials \
+  --from-literal=POSTGRES_PASSWORD=<password> \
+  --from-literal=POSTGRES_USER=mosip \
+  --from-literal=POSTGRES_DB=pad_liveness \
+  --from-literal=POSTGRES_HOST=postgres \
+  --from-literal=POSTGRES_PORT=5432
+
+kubectl create secret generic mosip-secrets \
+  --from-literal=MOSIP_ADMIN_API_KEY=<admin-key> \
+  --from-literal=MOSIP_AUDIT_HMAC_SECRET=<audit-secret> \
+  --from-literal=MOSIP_AUDIT_HMAC_PREVIOUS_SECRET=<previous-audit-secret>
+```
+
+Reference them in the pod spec:
+
+```yaml
+env:
+  - name: POSTGRES_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: db-credentials
+        key: POSTGRES_PASSWORD
+  - name: MOSIP_ADMIN_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: mosip-secrets
+        key: MOSIP_ADMIN_API_KEY
+  - name: MOSIP_AUDIT_HMAC_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: mosip-secrets
+        key: MOSIP_AUDIT_HMAC_SECRET
+```
+
+> 💡 **Tip**: For added security, consider using a secrets management solution like HashiCorp Vault, AWS Secrets Manager, or Azure Key Vault and inject values at runtime via init containers or sidecars.
+
+---
+
 | Key | Default | Description |
 |-----|---------|-------------|
-| `backend` | `auto` | `auto` = use the bundled MiniFASNet ONNX model when it loads, heuristic fallback otherwise; `heuristic` = force the OpenCV quality heuristic (model-less CI/debug). |
+| `backend` | `auto` | Single selection for **both** wirings — the HTTP scorer (`PassiveScoringService`) and the `LivenessBackend` SPI bean (interop report F5): `auto` = bundled MiniFASNet ONNX when it loads, heuristic fallback otherwise (SPI bean: the scripted mock); `heuristic` = force the OpenCV quality heuristic (SPI bean: the mock); `mock` / `onnx-minifasnet-v2` / `mediapipe-facemesh` / `tflite-minifasnet` = that backend by its audit id on **both** paths. Explicit ids never fall back to another scorer — unavailable means a coded, fail-closed error (the engine maps it to its device error). Unknown values fail at startup. |
 | `model-path` | *(blank)* | Filesystem override for the model; blank uses the bundled `classpath:models/minifasnet_v2.onnx` (SHA-256 `d7b3cd9b…` verified on load). |
 | `passive-threshold` | `0.80` | Mirrors `LivenessConfig.DEFAULT_PASSIVE_THRESHOLD`; the `config_policies` DB row wins at runtime. |
 | `min-face-quality`, `passive-min-frames`, `passive-window-frames`, `min-challenge-count`, `challenge-timeout-ms`, `max-retries` | see yml | Engine defaults for the embedded (library) path. |

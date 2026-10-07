@@ -2,6 +2,7 @@ package io.mosip.liveness.android;
 
 import java.security.SecureRandom;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -17,7 +18,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
+import io.mosip.liveness.dto.FrameProcessResult;
 import io.mosip.liveness.audit.AuditEvent;
 import io.mosip.liveness.audit.AuditEventType;
 import io.mosip.liveness.audit.AuditLogger;
@@ -35,6 +38,7 @@ import io.mosip.liveness.engine.FaceLivenessEngine;
 import io.mosip.liveness.engine.FrameAssessment;
 import io.mosip.liveness.engine.LivenessDecisionLogic;
 import io.mosip.liveness.engine.SessionSummary;
+import io.mosip.liveness.core.CombinedLivenessScore;
 
 /**
  * Android liveness gate orchestrator (orchestration spec §4/§8).
@@ -85,16 +89,17 @@ public final class AndroidLivenessOrchestrator {
     private final ModelStore modelStore;
     private final ExecutorService executor;
     private final SecureRandom random;
+    private final boolean diagnosticsEnabled;
 
     private final AtomicReference<LivenessListener> listenerRef = new AtomicReference<>();
     private final AtomicReference<Session> sessionRef = new AtomicReference<>();
     private final AtomicBoolean closed = new AtomicBoolean();
 
-    /** Test-visible executor injection; production uses a single daemon thread. */
-    AndroidLivenessOrchestrator(FaceLivenessEngine engine, LivenessBackend backend,
-                                AndroidLivenessPolicyProvider policyProvider, AuditLogger audit,
-                                Clock clock, LivenessEvidenceSigner signer, LockoutStore lockoutStore,
-                                ModelStore modelStore, ExecutorService executor) {
+    /** Executor and device-collaborator injection for Android host integration. */
+    public AndroidLivenessOrchestrator(FaceLivenessEngine engine, LivenessBackend backend,
+                                       AndroidLivenessPolicyProvider policyProvider, AuditLogger audit,
+                                       Clock clock, LivenessEvidenceSigner signer, LockoutStore lockoutStore,
+                                       ModelStore modelStore, ExecutorService executor, boolean diagnosticsEnabled) {
         this.engine = Objects.requireNonNull(engine);
         this.backend = Objects.requireNonNull(backend);
         this.policyProvider = Objects.requireNonNull(policyProvider);
@@ -109,12 +114,13 @@ public final class AndroidLivenessOrchestrator {
             return t;
         }) : executor;
         this.random = new SecureRandom();
+        this.diagnosticsEnabled = diagnosticsEnabled;
     }
 
     public AndroidLivenessOrchestrator(FaceLivenessEngine engine, LivenessBackend backend,
                                        AndroidLivenessPolicyProvider policyProvider, AuditLogger audit,
                                        Clock clock) {
-        this(engine, backend, policyProvider, audit, clock, null, null, null, null);
+        this(engine, backend, policyProvider, audit, clock, null, null, null, null, false);
     }
 
     public void setListener(LivenessListener listener) {
@@ -243,6 +249,7 @@ public final class AndroidLivenessOrchestrator {
     }
 
     private void handleFrame(Frame frame) {
+        long startNanos = System.nanoTime();
         Session s = sessionRef.get();
         if (s == null || s.terminal) {
             return;
@@ -288,9 +295,50 @@ public final class AndroidLivenessOrchestrator {
                             "unexpected assessment " + assessment.status());
                 }
             }
+            // Record diagnostics after frame processing (fail-closed when disabled)
+            recordDiagnostics(toFrameProcessResult(assessment), System.nanoTime() - startNanos);
         } catch (RuntimeException e) {
             deviceError(s, LivenessDeviceError.ENGINE_ERROR, "engine exception: " + e.getMessage());
+            // Record minimal diagnostics for the error case (factory methods are package-private)
+            recordDiagnostics(new FrameProcessResult(), System.nanoTime() - startNanos);
         }
+    }
+
+    /**
+     * Convert a FrameAssessment to a FrameProcessResult for diagnostics recording.
+     * Maps the engine's internal assessment to the DTO used by the diagnostic panel.
+     */
+    private FrameProcessResult toFrameProcessResult(FrameAssessment assessment) {
+        FrameProcessResult result = new FrameProcessResult();
+        result.setLivenessScore(assessment.livenessScore());
+        result.setPadFlag(assessment.padFlagged());
+        result.setPadAttackType(assessment.padAttackType() != null ? assessment.padAttackType().name() : null);
+
+        // Map status to action
+        String action = switch (assessment.status()) {
+            case SCORING -> "proceed";
+            case ESCALATED_TO_ACTIVE -> "escalate_to_active";
+            case CHALLENGE_IN_PROGRESS -> "proceed"; // continue challenge
+            case PASSED -> "proceed";
+            case PAD_BLOCKED -> "reject";
+            case FAILED -> "reject";
+            case SESSION_TIMED_OUT -> "locked";
+            case RETRYABLE_ERROR -> "retry_passive";
+            default -> "failed";
+        };
+        result.setAction(action);
+
+        // Set face quality from the assessment if available
+        // Face quality is not directly in FrameAssessment; we'll leave it null for now
+        // The backend's FaceSignals has qualityScore() which could be added if needed
+
+        if (assessment.challengeProgress() != null) {
+            FrameProcessResult.ChallengeInfo info = new FrameProcessResult.ChallengeInfo();
+            info.setChallengeType(assessment.challengeProgress().name());
+            result.setChallenge(info);
+        }
+
+        return result;
     }
 
     /**
@@ -568,6 +616,12 @@ public final class AndroidLivenessOrchestrator {
                 && clock.millis() < s.validUntilEpochMs;
     }
 
+    /** Current native gate session id for the host bridge; empty before start. */
+    public Optional<String> currentSessionId() {
+        Session session = sessionRef.get();
+        return session == null ? Optional.empty() : Optional.of(session.sessionId());
+    }
+
     /** Signed evidence of the most recent passed gate, if still valid. */
     public Optional<LivenessEvidence> currentEvidence() {
         Session s = lastPassed.get();
@@ -730,6 +784,13 @@ public final class AndroidLivenessOrchestrator {
         LivenessEvidence evidence;
         final Deque<Double> passiveWindow = new ArrayDeque<>();
 
+        // Diagnostic mode fields (matching backend DiagnosticsService)
+        /** Frames retained for diagnostics (matching backend capacity) */
+        private static final int DIAGNOSTIC_CAPACITY = 120;
+        final Deque<DiagnosticsSnapshot.FrameSample> diagnosticSamples = new ArrayDeque<>();
+        long frameCount;
+        String scorer; // delegate that produced the scores
+
         Session(LivenessGatePolicy policy, LivenessRole role, String userId) {
             this.policy = policy;
             this.role = role;
@@ -740,5 +801,241 @@ public final class AndroidLivenessOrchestrator {
         String sessionId() {
             return engineSessionId == null ? "pending" : engineSessionId;
         }
+    }
+
+    // ------------------------------------------------------------------ diagnostic mode
+
+    /**
+     * Diagnostic mode (opt-in, local) — orchestration spec §10: retains the raw
+     * scores, per-frame timings, FPS and the scorer delegate (the "delegate
+     * used") so the local-only debug panel can show them. Still no pixels: the
+     * input is the decision DTO, which never carries frame bytes.
+     *
+     * <p>Opt-in is fail-closed on both axes: with the flag off
+     * ({@code mosip.liveness.diagnostics-enabled}, default {@code false}) nothing
+     * is ever retained — an opt-in that silently buffered would be indistinguishable
+     * from always-on — and {@link #diagnosticsSnapshot()} returns the empty
+     * {@link DiagnosticsSnapshot#disabled()} payload rather than a stale window.
+     * The controller adds the second gate: loopback callers only.
+     *
+     * <p>Bounded by construction: a fixed-capacity ring of samples (no unbounded
+     * growth on a long-running service) and a sliding 5 s FPS window. The clock is
+     * injected so the window is testable without sleeping.
+     */
+    public DiagnosticsSnapshot diagnosticsSnapshot() {
+        Session s = sessionRef.get();
+        if (s == null) {
+            return DiagnosticsSnapshot.disabled();
+        }
+
+        // Check if diagnostics is enabled via configuration
+        if (!diagnosticsEnabled) {
+            return DiagnosticsSnapshot.disabled();
+        }
+
+        List<DiagnosticsSnapshot.FrameSample> retained;
+        String delegate;
+        long total;
+        synchronized (s) {
+            retained = new ArrayList<>(s.diagnosticSamples);
+            delegate = s.scorer;
+            total = s.frameCount;
+        }
+        Instant now = clock.instant();
+
+        List<Double> scores = new ArrayList<>();
+        for (DiagnosticsSnapshot.FrameSample sample : retained) {
+            if (sample.score() != null) {
+                scores.add(sample.score());
+            }
+        }
+        Double lastScore = scores.isEmpty() ? null : scores.get(scores.size() - 1);
+
+        long frameCountInWindow = 0;
+        Instant oldestInWindow = null;
+        Instant fiveSecondsAgo = now.minusSeconds(5);
+        for (DiagnosticsSnapshot.FrameSample sample : retained) {
+            if (!sample.at().isBefore(fiveSecondsAgo)) {
+                frameCountInWindow++;
+                if (oldestInWindow == null) {
+                    oldestInWindow = sample.at();
+                }
+            }
+        }
+        Double fps = null;
+        if (frameCountInWindow >= 2 && oldestInWindow != null) {
+            long spanMs = Math.max(1L, now.toEpochMilli() - oldestInWindow.toEpochMilli());
+            fps = (frameCountInWindow - 1) * 1000.0 / spanMs;
+        }
+
+        Double avgMs = null;
+        Double maxMs = null;
+        if (!retained.isEmpty()) {
+            long sum = 0L;
+            long max = Long.MIN_VALUE;
+            for (DiagnosticsSnapshot.FrameSample sample : retained) {
+                sum += sample.frameMs();
+                max = Math.max(max, sample.frameMs());
+            }
+            avgMs = (double) sum / retained.size();
+            maxMs = (double) max;
+        }
+
+        int from = Math.max(0, retained.size() - 30); // Match backend SNAPSHOT_ROWS = 30
+        List<DiagnosticsSnapshot.FrameSample> rows = new ArrayList<>(retained.subList(from, retained.size()));
+
+        Instant capturedAt = clock.instant();
+        return new DiagnosticsSnapshot(
+                true, // enabled - we already checked diagnosticsEnabled flag
+                delegate,
+                fps,
+                total,
+                lastScore,
+                median(scores),
+                avgMs,
+                maxMs,
+                rows,
+                capturedAt);
+    }
+
+    /** Median of the retained raw scores — same outlier-resistant shape the decision uses. */
+    private static Double median(List<Double> values) {
+        if (values.isEmpty()) {
+            return null;
+        }
+        List<Double> sorted = new ArrayList<>(values);
+        java.util.Collections.sort(sorted);
+        int mid = sorted.size() / 2;
+        if (sorted.size() % 2 == 1) {
+            return sorted.get(mid);
+        }
+        return (sorted.get(mid - 1) + sorted.get(mid)) / 2.0;
+    }
+
+    /**
+     * Record one frame's diagnostics after it was processed. Fail closed:
+     * when the mode is off nothing is stored, not even counters.
+     *
+     * @param result       the frame's decision (scores/quality/flag/action)
+     * @param elapsedNanos end-to-end cost of processing that frame
+     */
+    void recordDiagnostics(FrameProcessResult result, long elapsedNanos) {
+        Session s = sessionRef.get();
+        if (s == null) {
+            return;
+        }
+        // Fail closed: when diagnostics is off nothing is stored, not even counters
+        if (!diagnosticsEnabled || result == null) {
+            return;
+        }
+
+        Instant at = clock.instant();
+        Double score = result.getLivenessScore();
+        Double faceQuality = result.getFaceQuality();
+        Boolean padFlag = result.getPadFlag();
+        long frameMs = Math.max(0L, java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(elapsedNanos));
+        String action = result.getAction();
+
+        DiagnosticsSnapshot.FrameSample sample = new DiagnosticsSnapshot.FrameSample(
+                at, score, faceQuality, padFlag != null && padFlag, frameMs, action);
+
+        synchronized (s) {
+            s.diagnosticSamples.addLast(sample);
+            while (s.diagnosticSamples.size() > Session.DIAGNOSTIC_CAPACITY) {
+                s.diagnosticSamples.removeFirst();
+            }
+            s.frameCount++;
+            // The delegate is only knowable once a frame was actually scored;
+            // scorerId() has already resolved by then (score() ran in this
+            // request), so this is a cheap read, and only the first one costs
+            // a lookup.
+            if (s.scorer == null && result.getLivenessScore() != null) {
+                s.scorer = backend.id();
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ diagnostic model
+
+    /**
+     * What diagnostic mode exposes — orchestration spec §10: "adds raw scores,
+     * per-frame timings, FPS, delegate used. <b>Still no pixels.</b>"
+     *
+     * <p>Served only by {@code GET /api/v1/diagnostics}, and only when the mode is
+     * opted in (<code>mosip.liveness.diagnostics-enabled</code>) <em>and</em> the
+     * caller is loopback — the local-only debug panel. {@code ui-ux-design.md}
+     * keeps scores, PAD detail and model internals out of the user-facing UI
+     * (R5); this payload is the troubleshooting escape hatch behind both gates.
+     *
+     * @param enabled      false for the fail-closed {@link #disabled()} snapshot
+     * @param scorer       delegate that produced the scores (model id or
+     *                     {@code opencv-heuristic}); null until one was scored
+     * @param fps          frames/second over the sliding window; null with
+     *                     fewer than two frames in it
+     * @param frameCount   frames recorded since the process started (mode on)
+     * @param lastScore    raw passive score of the most recent scored frame
+     * @param medianScore  median of the retained raw scores
+     * @param avgFrameMs   mean end-to-end frame cost over the retained window
+     * @param maxFrameMs   worst end-to-end frame cost in the retained window
+     * @param recentFrames chronological capped rows for the panel table, newest last
+     * @param capturedAt   when the snapshot was taken
+     */
+    public record DiagnosticsSnapshot(
+            boolean enabled,
+            String scorer,
+            Double fps,
+            long frameCount,
+            Double lastScore,
+            Double medianScore,
+            Double avgFrameMs,
+            Double maxFrameMs,
+            List<FrameSample> recentFrames,
+            Instant capturedAt) {
+
+        /**
+         * One retained frame — numbers, a timestamp and short labels only. The
+         * type itself is the "no pixels" contract: there is nowhere in here to
+         * put frame bytes, base64 or an image path.
+         */
+        public record FrameSample(
+                Instant at,
+                Double score,
+                Double faceQuality,
+                boolean padFlag,
+                long frameMs,
+                String action) {
+        }
+
+        /** Fail-closed answer when the mode is off: nothing retained, nothing to read. */
+        public static DiagnosticsSnapshot disabled() {
+            return new DiagnosticsSnapshot(false, null, null, 0L,
+                    null, null, null, null, List.of(), null);
+        }
+    }
+
+    // ------------------------------------------------------------------ LivenessPipelineAdapter methods (for backward compatibility)
+
+    // These methods delegate to the engine to maintain compatibility with existing code
+    // that might still call these directly on the orchestrator
+
+    public String engineId() {
+        return backend.id();
+    }
+
+    public void setListener(LivenessListener listener, ExecutorService executor) {
+        setListener(listener);
+        // Note: executor parameter is ignored as we use our own executor
+    }
+
+    public Optional<LivenessEvidence> getEvidence() {
+        return currentEvidence();
+    }
+
+    public boolean isGateValid(String sessionId, long validitySec) {
+        return isGateValid(sessionId);
+    }
+
+    public void destroy() {
+        close();
     }
 }

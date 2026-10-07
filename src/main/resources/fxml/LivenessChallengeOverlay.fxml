@@ -7,6 +7,12 @@
   FXMLLoader.setRoot(this) + setController(this). There is deliberately NO
   fx:controller / fx:id on the root: the root StackPane IS the controller
   instance, and an fx:controller would build a second copy of it.
+
+  The root must be <fx:root>: FXMLLoader rejects a pre-set root when the document
+  declares a concrete element ("Root value already specified."), so a literal
+  <StackPane> here would make every LivenessChallengeOverlay construction throw
+  and the overlay could never be shown. The type attribute names the class the
+  host hands in via setRoot.
 -->
 <?import javafx.geometry.Insets?>
 <?import javafx.scene.control.Button?>
@@ -17,8 +23,9 @@
 <?import javafx.scene.layout.VBox?>
 <?import javafx.scene.shape.Ellipse?>
 
-<StackPane xmlns="http://javafx.com/javafx/17" xmlns:fx="http://javafx.com/fxml/1"
-           styleClass="liveness-overlay" visible="false" managed="false">
+<fx:root type="javafx.scene.layout.StackPane"
+         xmlns="http://javafx.com/javafx/17" xmlns:fx="http://javafx.com/fxml/1"
+         styleClass="liveness-overlay" visible="false" managed="false">
 
     <!-- Live camera preview (JavaFX ImageView path): the host adds its camera
          node here or feeds setPreviewImage(). Transparent when empty so the
@@ -73,4 +80,4 @@
                     visible="false" managed="false"/>
         </HBox>
     </VBox>
-</StackPane>
+</fx:root>

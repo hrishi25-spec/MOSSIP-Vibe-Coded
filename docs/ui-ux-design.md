@@ -105,6 +105,10 @@ to "Checking face liveness…".
 
 - One state machine (the orchestrator) drives all surfaces; Desktop, Android
   and the console render the **same states and the same message keys**.
+- The service-mediated path is not a second rendering story: when the desktop
+  client talks to the backend instead of running the orchestrator in process,
+  `ServiceLivenessEventMapper` turns each response into the same event pair, so
+  the overlay renders the same states and keys on either path.
 - Identical per-role policy: supervisor stricter (2 challenges, higher
   threshold, LOCK_OUT), resident most forgiving — but visually identical.
 - Operator/supervisor auth dialogs reuse the capture screen component with the

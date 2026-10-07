@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 
 import 'liveness_view_model.dart';
@@ -35,11 +36,16 @@ class LivenessView extends StatelessWidget {
     'feedback.detected': 'Action detected',
     'feedback.hold': 'Hold still',
     'liveness.success': 'Good, face captured successfully',
-    'liveness.failed.try_again': 'We could not verify face liveness. Please try again.',
-    'liveness.pad.generic': 'Face verification could not be completed. Please try again.',
-    'liveness.max_retries.recovery': 'Could not complete verification. Recovery required.',
-    'liveness.device.error': 'Device error. Please check the camera and try again.',
-    'liveness.device.unavailable': 'Biometric device not connected. Check the connection.',
+    'liveness.failed.try_again':
+        'We could not verify face liveness. Please try again.',
+    'liveness.pad.generic':
+        'Face verification could not be completed. Please try again.',
+    'liveness.max_retries.recovery':
+        'Could not complete verification. Recovery required.',
+    'liveness.device.error':
+        'Device error. Please check the camera and try again.',
+    'liveness.device.unavailable':
+        'Biometric device not connected. Check the connection.',
     'liveness.camera.unavailable': 'Camera not available.',
     'liveness.hint.look_camera': 'Look directly at the camera.',
     'liveness.hint.single_person': 'Only one person may be in the frame.',
@@ -63,7 +69,7 @@ class LivenessView extends StatelessWidget {
             // Preview: native renders camera frames into the Texture (R2).
             Positioned.fill(
               child: previewBuilder?.call(context) ??
-                      ColoredBox(color: Theme.of(context).colorScheme.surface),
+                  ColoredBox(color: Theme.of(context).colorScheme.surface),
             ),
             // Oval guide overlay.
             Center(
@@ -153,7 +159,8 @@ class LivenessView extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (viewModel.challengeTotal != null && viewModel.challengeIndex != null)
+          if (viewModel.challengeTotal != null &&
+              viewModel.challengeIndex != null)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: Text(
@@ -169,12 +176,14 @@ class LivenessView extends StatelessWidget {
           SizedBox(
             width: 160,
             child: LinearProgressIndicator(
-              value: viewModel.progress ?? (state == LivenessUiState.challengeVerifying ? null : 0),
+              value: viewModel.progress ??
+                  (state == LivenessUiState.challengeVerifying ? null : 0),
             ),
           ),
           if (feedback != null) ...[
             const SizedBox(height: 8),
-            Text(_msg(feedback), style: Theme.of(context).textTheme.labelMedium),
+            Text(_msg(feedback),
+                style: Theme.of(context).textTheme.labelMedium),
           ],
         ],
       ),
@@ -196,7 +205,8 @@ class LivenessView extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(_msg(key), textAlign: TextAlign.center),
-          if (viewModel.failCategory == 'MAX_RETRIES' && viewModel.nextAction == 'LOCKOUT')
+          if (viewModel.failCategory == 'MAX_RETRIES' &&
+              viewModel.nextAction == 'LOCKOUT')
             Padding(
               padding: const EdgeInsets.only(top: 8),
               child: Text(
@@ -229,13 +239,13 @@ class LivenessView extends StatelessWidget {
         _ => 'liveness.checking',
       };
 
-  Widget _card(BuildContext context,
-      {required Widget child, Color? tone}) {
+  Widget _card(BuildContext context, {required Widget child, Color? tone}) {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: (tone ?? Theme.of(context).colorScheme.surface).withValues(alpha: 0.92),
+        color:
+            (tone ?? Theme.of(context).colorScheme.surface).withOpacity(0.92),
         borderRadius: BorderRadius.circular(14),
       ),
       child: DefaultTextStyle(

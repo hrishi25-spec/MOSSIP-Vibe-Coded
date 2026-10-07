@@ -156,6 +156,33 @@
       <version>5.10.2</version>
       <scope>test</scope>
     </dependency>
+
+    <!-- Headless JavaFX: the desktop overlay can only be proved to render by
+         actually instantiating it, and neither a build machine nor a CI runner
+         has a display. Monocle is the headless glass platform (a screen with no
+         window system behind it); testfx-core supplies the FX-thread test
+         plumbing (asyncFx + waitFor) that runs each step on the JavaFX
+         Application Thread and reports the failure on the test thread. Both are
+         test-only — like the JavaFX dependencies above, none of this ships in
+         the service jar. -->
+    <dependency>
+      <groupId>org.testfx</groupId>
+      <artifactId>testfx-core</artifactId>
+      <version>4.0.18</version>
+      <scope>test</scope>
+    </dependency>
+    <!-- Monocle is not optional here, and neither is the version: it is the
+         headless glass platform, and it is built against the exact JavaFX it
+         runs on. The jdk-12.0.1+2 build that TestFX's own documentation
+         suggests dies with an AbstractMethodError on Window._updateViewSize as
+         soon as the first window is created, so this tracks javafx.version
+         above (17.0.10). -->
+    <dependency>
+      <groupId>org.testfx</groupId>
+      <artifactId>openjfx-monocle</artifactId>
+      <version>${javafx.version}</version>
+      <scope>test</scope>
+    </dependency>
     <dependency>
       <groupId>org.testcontainers</groupId>
       <artifactId>junit-jupiter</artifactId>
@@ -205,6 +232,19 @@
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
         <version>3.2.5</version>
+        <configuration>
+          <!-- Headless JavaFX for every fork. The overlay smoke test starts the
+               JavaFX toolkit, and a CI runner has no X server, so glass is
+               pinned to Monocle's Headless screen and the rasteriser to
+               software; without these the toolkit start fails on the runner
+               and the smoke test could only ever pass on a developer machine.
+               They are inert for the non-JavaFX tests in the suite. -->
+          <systemPropertyVariables>
+            <glass.platform>Monocle</glass.platform>
+            <monocle.platform>Headless</monocle.platform>
+            <prism.order>sw</prism.order>
+          </systemPropertyVariables>
+        </configuration>
       </plugin>
     </plugins>
   </build>

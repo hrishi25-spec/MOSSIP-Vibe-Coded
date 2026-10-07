@@ -11,6 +11,7 @@ import java.util.Properties;
 import io.mosip.liveness.android.ModelStore;
 import io.mosip.liveness.android.SignedManifestModelStore;
 import io.mosip.liveness.android.SignedModelManifest;
+import io.mosip.liveness.audit.AuditLogger;
 
 /**
  * Production {@link ModelStore} glue for the Registration Client (spec §13):
@@ -33,12 +34,38 @@ public final class AndroidModelStore implements ModelStore {
     }
 
     /**
+     * Rotation form: trust several vendor keys at once (the previous and the
+     * current signing key during a rotation window). Manifests that name a
+     * {@code keyId} verify only under that exact key; manifests without one
+     * (legacy) may verify under any key still trusted. Revoke a key by
+     * constructing without it.
+     */
+    public AndroidModelStore(String currentAppVersion, PublicKey... trustedKeys) {
+        this.delegate = new SignedManifestModelStore(currentAppVersion, trustedKeys);
+    }
+
+    /**
+     * Audited form: every swap, refusal and rollback is emitted as a
+     * {@code MODEL_UPDATED} event (old/new version, hash-ok, failing check)
+     * through {@code audit} — no caller-side logging needed.
+     */
+    public AndroidModelStore(PublicKey vendorKey, String currentAppVersion, AuditLogger audit) {
+        this.delegate = new SignedManifestModelStore(vendorKey, currentAppVersion, audit);
+    }
+
+    /** Rotation + audit form — see {@link SignedManifestModelStore}. */
+    public AndroidModelStore(String currentAppVersion, AuditLogger audit, PublicKey... trustedKeys) {
+        this.delegate = new SignedManifestModelStore(currentAppVersion, audit, trustedKeys);
+    }
+
+    /**
      * Install a downloaded or sideloaded update (spec §13 online and offline
      * paths share this verification). The manifest file is properties format
      * with keys {@code modelId}, {@code version}, {@code sha256},
-     * {@code minAppVersion}, {@code signature}. Returns false — keeping the
+     * {@code minAppVersion}, {@code keyId}, {@code signature}. Returns false — keeping the
      * currently active model — on any I/O or verification failure (fail
-     * closed); the caller audits {@code MODEL_UPDATED(rollback)}.
+     * closed); the delegate audits each outcome as {@code MODEL_UPDATED}
+     * itself (old/new version, hash-ok), so the caller must not duplicate it.
      */
     public boolean install(File manifestFile, File modelPayloadFile) {
         try {
@@ -51,7 +78,8 @@ public final class AndroidModelStore implements ModelStore {
                     properties.getProperty("version"),
                     properties.getProperty("sha256"),
                     properties.getProperty("minAppVersion"),
-                    properties.getProperty("signature"));
+                    properties.getProperty("signature"),
+                    properties.getProperty("keyId"));
             byte[] payload = Files.readAllBytes(modelPayloadFile.toPath());
             return delegate.activate(manifest, payload);
         } catch (IOException | RuntimeException e) {

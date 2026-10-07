@@ -4,7 +4,7 @@ import io.mosip.liveness.audit.AuditLogger;
 import io.mosip.liveness.audit.MetricsCollector;
 import io.mosip.liveness.audit.StructuredAuditLogger;
 import io.mosip.liveness.backend.LivenessBackend;
-import io.mosip.liveness.backend.MockLivenessBackend;
+import io.mosip.liveness.backend.LivenessBackendSelection;
 import io.mosip.liveness.config.LivenessConfig;
 import io.mosip.liveness.metrics.PipelineTimers;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -307,8 +307,14 @@ public class AppConfig {
     }
 
     @Bean
-    public LivenessBackend livenessBackend() {
-        return new MockLivenessBackend();
+    public LivenessBackend livenessBackend(@Value("${mosip.liveness.backend:auto}") String backend) {
+        // The SAME key the HTTP scoring path reads (interop report F5): one
+        // selection, both wirings, so they cannot silently diverge. In
+        // 'auto'/'heuristic' this yields the scripted mock — this path's
+        // behaviour before the key applied, preserved. Construction only:
+        // FaceLivenessEngine calls initialize() itself, so selecting a model
+        // backend loads nothing at boot.
+        return LivenessBackendSelection.parse(backend).createBackend();
     }
 
     @Bean

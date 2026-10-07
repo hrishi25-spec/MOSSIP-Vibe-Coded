@@ -190,11 +190,12 @@ class DecisionEngineServiceTest {
 
     @Test
     void aFloorBelowTheAbsoluteMinimumIsClampedToOneSecond() {
-        // 10ms would expire any challenge; the clamp keeps it open for 500ms,
-        // matching the smallest challengeTimeoutMs the config API accepts.
+        // The configured 10ms floor is clamped to one second. Keep the request
+        // near the start of that window so scheduler delays cannot make the test
+        // cross the deadline before the assertion.
         ReflectionTestUtils.setField(service, "minChallengeWindowMs", 10L);
-        challenge.setTimeoutMs(1_000);
-        challenge.setIssuedAt(OffsetDateTime.now().minus(500, java.time.temporal.ChronoUnit.MILLIS));
+        challenge.setTimeoutMs(10);
+        challenge.setIssuedAt(OffsetDateTime.now().minus(100, java.time.temporal.ChronoUnit.MILLIS));
         when(configService.getEffectivePolicy(any())).thenReturn(policy(1, 2));
         when(livenessEngine.validateActive(eq(DB_TURN_LEFT), anyList(), any())).thenReturn(false);
 

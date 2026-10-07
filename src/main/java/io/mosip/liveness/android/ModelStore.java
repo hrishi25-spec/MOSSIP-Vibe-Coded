@@ -16,7 +16,10 @@ public interface ModelStore {
     /**
      * Verify (sha256 + signature at the glue layer) and atomically activate.
      * Returns false when verification fails — the caller must keep the
-     * previous version and audit {@code MODEL_UPDATED(rollback)}.
+     * previous version and audit {@code MODEL_UPDATED(rollback)}. Audited
+     * implementations ({@code SignedManifestModelStore}) emit that event
+     * themselves, with old/new version and hash-ok, so their callers must
+     * not log it a second time.
      */
     boolean activate(String modelId, String version, byte[] payload);
 

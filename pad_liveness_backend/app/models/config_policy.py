@@ -1,8 +1,8 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Float, Integer, Boolean, DateTime, Enum, String, func
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy import Float, Integer, Boolean, DateTime, Enum, JSON, String, Uuid, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -17,7 +17,7 @@ class ConfigPolicy(Base):
     """
     __tablename__ = "config_policies"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     workflow_type: Mapped[WorkflowType] = mapped_column(
         Enum(WorkflowType, name="config_workflow_type"), unique=True, nullable=False
     )
@@ -27,7 +27,7 @@ class ConfigPolicy(Base):
 
     active_liveness_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     min_challenge_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    challenge_types: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    challenge_types: Mapped[list] = mapped_column(JSON().with_variant(JSONB, "postgresql"), nullable=False, default=list)
     challenge_timeout_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=8000)
 
     max_retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=3)

@@ -1,12 +1,9 @@
-import 'dart:async';
-import 'dart:typed_data';
-
 import 'package:pigeon/pigeon.dart';
 
 /// Pigeon bridge for the Android liveness gate (orchestration spec §7).
 ///
 /// Regenerate the host/flutter code with:
-///   dart run pigeon --input pigeon/liveness.dart
+///   ./tool/generate_pigeon.sh
 ///
 /// Rules encoded here (spec R1–R5):
 ///   * Frames NEVER cross this channel (R2) — preview is a Flutter Texture,
@@ -66,11 +63,4 @@ class LivenessFinalResult {
   String? nextAction; // PROCEED | BLOCK | FALLBACK | LOCKOUT | EXCEPTION
   int? lockoutSeconds;
   int? validForSeconds;
-}
-
-/// Dart-side handle to the native preview texture (R2). The Android glue
-/// registers a SurfaceTexture and returns its id in [LivenessStartResult].
-class LivenessPreview {
-  int? textureId;
-  Uint8List? reserved; // unused; keeps the class serializable if extended
 }

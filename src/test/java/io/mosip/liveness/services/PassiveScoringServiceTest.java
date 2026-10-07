@@ -1,5 +1,7 @@
 package io.mosip.liveness.services;
 
+import io.mosip.liveness.backend.MediaPipeFaceMeshBackend;
+import io.mosip.liveness.core.LivenessException;
 import io.mosip.liveness.core.PadVerdict;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -11,9 +13,11 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -104,5 +108,60 @@ class PassiveScoringServiceTest {
         } finally {
             frame.release();
         }
+    }
+
+    // ------------------------------------------- explicit selections (F5)
+
+    @Test
+    void explicitMockSelectionIsHonouredByTheService() {
+        PassiveScoringService scorer = new PassiveScoringService(
+                mock(LivenessEngineService.class), "mock", "");
+
+        assertTrue(scorer.isModelAvailable(),
+                "the mock is a configured scorer on this path, not the heuristic");
+        assertEquals("mock", scorer.scorerId());
+    }
+
+    @Test
+    void explicitOnnxSelectionIsHonouredByTheService() {
+        PassiveScoringService scorer = new PassiveScoringService(
+                mock(LivenessEngineService.class), "onnx-minifasnet-v2", "");
+
+        assertTrue(scorer.isModelAvailable(), "bundled model + ONNX Runtime must load");
+        assertEquals("onnx-minifasnet-v2", scorer.scorerId());
+    }
+
+    @Test
+    void explicitUnavailableSelectionFailsClosedInsteadOfChoosingAnotherScorer() {
+        LivenessEngineService heuristic = mock(LivenessEngineService.class);
+        PassiveScoringService scorer = new PassiveScoringService(
+                heuristic, "mediapipe-facemesh", "");
+
+        if (MediaPipeFaceMeshBackend.isTfLiteAvailable()) {
+            // Availability is probed, not assumed: on a host with TFLite the
+            // explicit selection simply loads.
+            assertTrue(scorer.isModelAvailable());
+            assertEquals("mediapipe-facemesh", scorer.scorerId());
+            return;
+        }
+
+        // This build: a coded refusal, on every call, naming the key — never
+        // a silent swap to the heuristic or to another backend (F5).
+        LivenessException refusal = assertThrows(LivenessException.class,
+                scorer::isModelAvailable);
+        assertTrue(refusal.getMessage().contains("mosip.liveness.backend=mediapipe-facemesh"),
+                refusal.getMessage());
+        assertThrows(LivenessException.class, scorer::scorerId,
+                "the failure is cached: one attempt, same refusal");
+        verify(heuristic, never()).scorePassive(any(), any(), any());
+    }
+
+    @Test
+    void unknownModeFailsAtConstruction() {
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> new PassiveScoringService(mock(LivenessEngineService.class),
+                        "gibberish", ""),
+                "an unknown value must stop bean creation, not pick a scorer");
+        assertTrue(e.getMessage().contains("mosip.liveness.backend"), e.getMessage());
     }
 }

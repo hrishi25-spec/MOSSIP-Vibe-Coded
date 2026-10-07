@@ -11,6 +11,8 @@ import io.mosip.liveness.models.enums.SessionStatus;
 import io.mosip.liveness.crud.ChallengeRepository;
 import io.mosip.liveness.crud.FrameEventRepository;
 import io.mosip.liveness.crud.LivenessSessionRepository;
+import io.mosip.liveness.audit.MetricsCollector;
+import io.mosip.liveness.audit.MetricsSnapshot;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -29,6 +31,7 @@ public class MetricsController {
     private final FrameEventRepository frameEventRepo;
     private final ChallengeRepository challengeRepo;
     private final RateLimitCounters rateLimitCounters;
+    private final MetricsCollector metricsCollector;
 
     @GetMapping
     public OperationalMetrics getOperationalMetrics() {
@@ -53,6 +56,7 @@ public class MetricsController {
         // Where the per-frame time actually goes, same in-memory caveat.
         java.util.Map<String, PipelineTimers.PhaseTiming> pipeline = PipelineTimers.snapshot();
 
+        MetricsSnapshot metricsSnapshot = metricsCollector.snapshot();
         return OperationalMetrics.builder()
                 .totalSessions((int) totalSessions)
                 .passedSessions((int) passed)
@@ -65,6 +69,10 @@ public class MetricsController {
                 .livenessRetryRate(safeDiv(totalRetries, totalSessions))
                 .livenessFailureRate(safeDiv(failed, totalSessions))
                 .padRejectionRate(safeDiv(padRejections, totalSessions))
+                .printPhotoApcer(metricsSnapshot.printPhotoApcer())
+                .screenReplayApcer(metricsSnapshot.screenReplayApcer())
+                .videoReplayApcer(metricsSnapshot.videoReplayApcer())
+                .otherApcer(metricsSnapshot.otherApcer())
                 .pipelineTimings(pipeline)
                 .rateLimitAllowedRequests((int) limiter.allowed())
                 .rateLimitedRequests((int) limiter.rejected())

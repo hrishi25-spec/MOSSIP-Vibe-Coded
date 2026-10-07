@@ -63,13 +63,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
         "spring.jpa.hibernate.ddl-auto=validate",
         "spring.flyway.enabled=true"
 })
+@org.springframework.test.context.TestPropertySource(properties = {
+        "MOSIP_ADMIN_API_KEY=test-admin-key-that-is-long-enough-for-validation"
+})
 class PostgresSchemaTest {
 
     @Container
     private static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16")
             .withDatabaseName("pad_liveness")
             .withUsername("mosip")
-            .withPassword("change_me");
+            .withPassword("test-postgres-password");
 
     @DynamicPropertySource
     static void postgresProperties(DynamicPropertyRegistry properties) {

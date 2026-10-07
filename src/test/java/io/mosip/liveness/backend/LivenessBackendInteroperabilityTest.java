@@ -209,6 +209,42 @@ class LivenessBackendInteroperabilityTest {
     }
 
     @Test
+    void theBackendSelectionConfigBuildsTheEngineThroughTheSameContract() {
+        // Report recommendation on F5: construct the engine through the
+        // selection path, not just by handing the backend over directly.
+        for (String id : new String[]{"mock", "onnx-minifasnet-v2", "mediapipe-facemesh"}) {
+            assertEquals(id, LivenessBackendSelection.parse(id).createBackend().id());
+
+            boolean available;
+            LivenessBackend probe = LivenessBackendSelection.parse(id).createBackend();
+            try {
+                probe.initialize(Map.of());
+                probe.shutdown();
+                available = true;
+            } catch (LivenessException refused) {
+                available = false;
+            }
+
+            if (available) {
+                assertDoesNotThrow(
+                        () -> new FaceLivenessEngine(LivenessConfig.builder().build(),
+                                LivenessBackendSelection.parse(id).createBackend()),
+                        id + ": a selectable backend must construct an engine cleanly");
+            } else {
+                LivenessException ex = assertThrows(LivenessException.class,
+                        () -> new FaceLivenessEngine(LivenessConfig.builder().build(),
+                                LivenessBackendSelection.parse(id).createBackend()),
+                        id + ": an unavailable selection must fail engine construction closed");
+                assertEquals(LivenessErrorCode.DEVICE_CONNECTION_FAILURE, ex.errorCode(),
+                        id + ": the engine's uniform mapping, reached via the selection path");
+            }
+        }
+        // The key's default keeps this path on the scripted mock (F5 unchanged).
+        assertEquals("mock", LivenessBackendSelection.parse("auto").createBackend().id());
+        assertEquals("mock", LivenessBackendSelection.parse("heuristic").createBackend().id());
+    }
+
+    @Test
     void theReportCitesExactlyTheseBackendIds() {
         // docs/backend-interoperability-report.md names these ids verbatim;
         // a drift here is a report update, not a silent rename.

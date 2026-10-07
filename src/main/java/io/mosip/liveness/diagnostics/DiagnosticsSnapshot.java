@@ -23,7 +23,7 @@ import java.util.List;
  * @param medianScore  median of the retained raw scores
  * @param avgFrameMs   mean end-to-end frame cost over the retained window
  * @param maxFrameMs   worst end-to-end frame cost in the retained window
- * @param recentFrames newest-first capped rows for the panel table
+ * @param recentFrames chronological capped rows for the panel table, newest last
  * @param capturedAt   when the snapshot was taken
  */
 public record DiagnosticsSnapshot(
