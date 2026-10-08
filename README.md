@@ -20,7 +20,7 @@ src/main/java/io/mosip/liveness/
     MetricsController.java          # GET /metrics
     AuditController.java            # GET /sessions/{id}/audit
     HealthController.java           # GET /health
-  dto/                              # Request/response schemas (Pydantic-like)
+  dto/                              # Request/response schemas (JSON DTOs)
     SessionCreateRequest.java
     SessionResponse.java
     FrameSubmitRequest.java
@@ -70,19 +70,30 @@ src/main/java/io/mosip/liveness/
 src/main/resources/
   application.yml                   # Spring Boot config (DB, liveness params)
   application-dev.yml               # Dev profile (H2 in-memory DB)
-  db/migration/V1__init_schema.sql  # Flyway migration (replaces Alembic)
+  db/migration/V1__init_schema.sql  # Flyway migration (applied at startup)
 ```
 
 ### Pluggable liveness/PAD engines
 
-`BaseLivenessEngine` and `BasePADEngine` (in `app/services/`) are the
-contracts the rest of the system depends on. Ship-provided implementations
-(`MockLivenessEngine`, `MockPADEngine`) use cheap OpenCV heuristics
-(sharpness, frequency-domain analysis, motion/eye detection) as
-**placeholders only** — replace them with a real, ISO/IEC 30107-3 evaluated
-model or vendor SDK before production use. Nothing else in the codebase
-needs to change: implement the base class and update `get_liveness_engine()`
-/ `get_pad_engine()`.
+`io.mosip.liveness.backend.LivenessBackend` is the SPI everything above depends
+on — `id()`, `initialize()`, `analyzeFrame()`, `scorePassiveLiveness()`,
+`assessPad()` and `shutdown()`. Four implementations ship here (`mock`,
+`onnx-minifasnet-v2`, `mediapipe-facemesh`, `tflite-minifasnet`), and the
+`mosip.liveness.backend` property selects one for **both** scoring paths: the
+HTTP path (`PassiveScoringService`) and the SPI bean
+(`AppConfig.livenessBackend`). `LivenessBackendSelection` owns that vocabulary
+and parses it once for both paths: `auto` and `heuristic` preserve the earlier
+behaviour (bundled ONNX model on the HTTP path, scripted mock on the SPI path);
+an explicitly named backend is honoured strictly — no silent fallback if it
+cannot load — and an unknown value fails at startup instead of quietly picking
+a different scorer.
+
+The `mock` backend is a scripted placeholder and the model-backed backends are
+reference integrations: replace them with a real, ISO/IEC 30107-3 evaluated
+model or vendor SDK before production use, by implementing `LivenessBackend`
+and naming it in `mosip.liveness.backend`. Per-backend runtime dependencies,
+determinism and observed behaviour are measured in
+[docs/backend-interoperability-report.md](docs/backend-interoperability-report.md).
 
 ### Decision flow (matches spec)
 
@@ -315,6 +326,40 @@ To check the image path the same way CI does:
 
 API available at `http://localhost:8000`, docs at `http://localhost:8000/swagger-ui.html`.
 
+## Tests and gates
+
+CI runs every gate below on each push and pull request, and each one is
+runnable locally — that is the point of listing them. Two of them live outside
+Maven because Maven cannot reach what they check:
+
+- `node src/test/js/console-guards.test.mjs` drives the real `index.html` and
+  `console.js` in a DOM and exercises the dirty marker, the per-field diff, the
+  discard guard and the unload warnings. The console is plain browser JS with no
+  build step, so a green Java suite says nothing about whether it is still
+  wired.
+- `./scripts/boot-median.sh` boots the packaged jar five times, each from a cold
+  OpenCV native cache, and fails if the median time to a serving `/health`
+  exceeds `BOOT_MEDIAN_MAX_SECONDS`. A new eager bean or an extra migration
+  ships green everywhere else and shows up only as "deployments are slow now".
+
+| Gate | Run it locally | CI job |
+| --- | --- | --- |
+| Java unit + integration suites | `./mvnw --batch-mode test` | *Unit tests*, *Integration tests* |
+| PostgreSQL schema gate (entities vs Flyway migrations) | `./mvnw --batch-mode test -Dtest='PostgresSchemaTest'` | *PostgreSQL schema gate* |
+| Console DOM guards | `node src/test/js/console-guards.test.mjs` | *Console DOM tests* |
+| Project boundaries (guidance, instruction scope, documented gates) | `node scripts/check-project-boundaries.mjs` | *Project boundaries* |
+| Packaged jar boots and serves | `./scripts/smoke-jar.sh` | *Package … jar* |
+| Jar size ceiling | `./scripts/check-jar-size.sh 'target/pad-liveness-backend-*-slim.jar' 110 'slim jar'` | *Package … jar* |
+| Cold boot time (median of 5) | `./scripts/boot-median.sh` | *Cold boot time (median)* |
+| Docker image boots, non-root, `/health` ok | `./scripts/smoke-docker.sh` | *Docker image* |
+| Python backend suite | see [pad_liveness_backend/README.md](pad_liveness_backend/README.md) | *Python liveness backend tests* |
+| Android client build gates | see [android_client/README.md](android_client/README.md) | *Android/Flutter client build* |
+
+The *Project boundaries* gate keeps this table honest: it fails if a command
+documented here or in a project README is not run by a workflow, and equally if
+a workflow runs a gate that no document mentions. Adding a gate means writing it
+down and wiring it up in the same change.
+
 ## Example flow (curl)
 
 ```bash
@@ -464,5 +509,9 @@ export MOSIP_AUDIT_HMAC_SECRET=$(openssl rand -hex 32)
   pattern on the Registration Client side) — this service only consumes
   decoded frames, so it works with any compliant L0/L1 device.
 - **ISO/IEC 30107 alignment**: replace the mock engines with a properly
-  evaluated model, and use `app/services/*_engine.py` as the seam for
-  reporting APCER/BPCER/ACER during evaluation.
+  evaluated model, and use the `io.mosip.liveness.eval` harness
+  (`AttackScenarioHarness`, `PadMetrics`, `ThresholdSweep`) over a labeled
+  corpus — including the per-PAI-species APCER breakdown in `ScenarioReport` —
+  to report APCER/BPCER/ACER during evaluation, as
+  [docs/backend-interoperability-report.md](docs/backend-interoperability-report.md)
+  does for the shipped backends.

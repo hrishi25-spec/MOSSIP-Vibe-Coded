@@ -5,7 +5,7 @@ from sqlalchemy import Float, Integer, Boolean, DateTime, Enum, JSON, String, Uu
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base
+from app.db.base_class import Base
 from app.models.enums import WorkflowType, FailurePolicy
 
 

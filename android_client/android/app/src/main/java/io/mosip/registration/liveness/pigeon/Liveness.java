@@ -559,7 +559,7 @@ public class Liveness {
    * Pigeon bridge for the Android liveness gate (orchestration spec §7).
    *
    * Regenerate the host/flutter code with:
-   *   dart run pigeon --input pigeon/liveness.dart
+   *   ./tool/generate_pigeon.sh
    *
    * Rules encoded here (spec R1–R5):
    *   * Frames NEVER cross this channel (R2) — preview is a Flutter Texture,

@@ -1029,6 +1029,8 @@ already in use.
 - `V1__init_schema.sql` — 5 tables, indexes, seed data
 
 ### Documentation
+- `docs/PRD.md` — product requirements + full system reference: goals, repository contents,
+  decision flow, API, data model, configuration, security, evaluation, tests, and known gaps
 - `docs/design.md`, `docs/status-report.md`, `docs/backend-swapping.md`,
   `docs/configuration.md`, `docs/client-integration-guide.md`
 - `README.md` (repo root) — quick start, cross-platform launchers, architecture summary

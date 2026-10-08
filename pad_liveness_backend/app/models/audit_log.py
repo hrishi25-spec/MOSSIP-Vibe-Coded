@@ -5,7 +5,7 @@ from sqlalchemy import DateTime, ForeignKey, JSON, String, Uuid, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base
+from app.db.base_class import Base
 
 
 class AuditLog(Base):

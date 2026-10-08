@@ -44,23 +44,34 @@ android {
     sourceSets {
         main.java {
             srcDirs += ['src/main/kotlin', '../../../src/main/java']
-            include 'io/mosip/registration/liveness/**'
-            include 'io/mosip/registration/livenessclient/**'
-            include 'io/mosip/liveness/android/**'
-            include 'io/mosip/liveness/core/**'
-            include 'io/mosip/liveness/engine/**'
-            include 'io/mosip/liveness/challenge/**'
-            include 'io/mosip/liveness/config/EffectivePolicy.java'
-            include 'io/mosip/liveness/config/LivenessConfig.java'
-            include 'io/mosip/liveness/config/WorkflowPolicyDefaults.java'
-            include 'io/mosip/liveness/audit/AuditEvent.java'
-            include 'io/mosip/liveness/audit/AuditEventType.java'
-            include 'io/mosip/liveness/audit/AuditLogger.java'
-            include 'io/mosip/liveness/audit/MetricsCollector.java'
-            include 'io/mosip/liveness/backend/LivenessBackend.java'
-            include 'io/mosip/liveness/diagnostics/DiagnosticsSnapshot.java'
-            include 'io/mosip/liveness/dto/FrameProcessResult.java'
-            include 'io/mosip/liveness/models/enums/LivenessStage.java'
+            // The Java plugin seeds this source set with the pattern `**/*.java`,
+            // and `include` only ever adds to that list — so the include-only
+            // subset below never restricted anything and Gradle compiled all of
+            // ../../../src/main/java (Spring, JPA, OpenCV, ONNX). Replace the
+            // pattern list outright instead, keeping the source set to the
+            // dependencies-free engine subset the client actually embeds.
+            setIncludes([
+                'io/flutter/plugins/**',
+                'io/mosip/registration/liveness/**',
+                'io/mosip/registration/livenessclient/**',
+                'io/mosip/liveness/android/**',
+                'io/mosip/liveness/core/**',
+                'io/mosip/liveness/engine/**',
+                'io/mosip/liveness/challenge/**',
+                'io/mosip/liveness/config/EffectivePolicy.java',
+                'io/mosip/liveness/config/LivenessConfig.java',
+                'io/mosip/liveness/config/LivenessPolicy.java',
+                'io/mosip/liveness/config/WorkflowPolicyDefaults.java',
+                'io/mosip/liveness/audit/AuditEvent.java',
+                'io/mosip/liveness/audit/AuditEventType.java',
+                'io/mosip/liveness/audit/AuditLogger.java',
+                'io/mosip/liveness/audit/MetricsCollector.java',
+                'io/mosip/liveness/audit/MetricsSnapshot.java',
+                'io/mosip/liveness/backend/LivenessBackend.java',
+                'io/mosip/liveness/diagnostics/DiagnosticsSnapshot.java',
+                'io/mosip/liveness/dto/FrameProcessResult.java',
+                'io/mosip/liveness/models/enums/LivenessStage.java',
+            ])
         }
     }
 

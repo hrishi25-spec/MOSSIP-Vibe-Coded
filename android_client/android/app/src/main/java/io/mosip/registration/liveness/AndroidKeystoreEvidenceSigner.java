@@ -4,12 +4,11 @@ import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 
 import java.nio.charset.StandardCharsets;
+import java.security.KeyPairGenerator;
 import java.security.KeyStore;
 import java.security.PrivateKey;
 import java.security.Signature;
 import java.security.cert.Certificate;
-
-import javax.crypto.KeyGenerator;
 
 import io.mosip.liveness.android.LivenessEvidenceSigner;
 
@@ -47,7 +46,9 @@ public final class AndroidKeystoreEvidenceSigner implements LivenessEvidenceSign
             if (ks.containsAlias(KEY_ALIAS)) {
                 return;
             }
-            KeyGenerator kg = KeyGenerator.getInstance(
+            // RSA key pairs come from KeyPairGenerator; KeyGenerator only
+            // builds symmetric keys and has no KeyGenParameterSpec overload.
+            KeyPairGenerator kg = KeyPairGenerator.getInstance(
                     KeyProperties.KEY_ALGORITHM_RSA, ANDROID_KEYSTORE);
             kg.initialize(new KeyGenParameterSpec.Builder(KEY_ALIAS,
                     KeyProperties.PURPOSE_SIGN | KeyProperties.PURPOSE_VERIFY)

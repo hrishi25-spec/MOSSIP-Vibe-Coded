@@ -44,6 +44,20 @@ fails if either output differs, then builds `build/app/outputs/flutter-apk/app-d
 The Gradle wrapper verifies its distribution checksum and Gradle dependency
 versions are locked.
 
+`tool/generate_pigeon.sh` runs `dart format` on the Dart binding after Pigeon
+writes it: Pigeon 10.0.1's raw output is not `dart format`-clean, so without
+that step the regenerate-and-diff gate and the format gate could never both
+pass. The Java output is left exactly as Pigeon emits it.
+
+The Gradle module does not compile all of `src/main/java` — it pulls in an
+explicit pattern list (orchestrator, engine core, policy, audit, evidence)
+that is free of Spring, OpenCV, and ONNX dependencies. The list is set with
+`setIncludes`, not `include`: the Java plugin seeds the source set with
+`**/*.java`, and `include` only adds to that list, which would sweep in every
+file under `src/main/java`. A new engine type used by these sources must be
+added to the list in `android/app/build.gradle`, or the Android build fails on
+the missing symbol.
+
 ## Engine-side components (already in `src/main/java`)
 
 | Component | Responsibility (spec §2) |

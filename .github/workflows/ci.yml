@@ -77,10 +77,35 @@ jobs:
       - name: Run the console guard tests
         run: node src/test/js/console-guards.test.mjs
 
+  # Guidance and instruction scope. Nothing else in this workflow reads
+  # AGENTS.md or the READMEs: a project can land with no guidance and no map
+  # entry, and a paragraph copied from another project's README can tell
+  # readers to edit files that do not exist in the tree they are in. Both have
+  # shipped here, so the check exists now instead of in whoever notices next.
+  #
+  # Deliberately not a dependency of package/docker/release: a boundary
+  # problem is a reason to fix the PR, not a reason to withhold a jar. Like
+  # the console harness it needs no setup step — ubuntu-latest ships node, and
+  # the script has no dependencies.
+  boundaries:
+    name: Project boundaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check project guidance and instruction scope
+        run: node scripts/check-project-boundaries.mjs
+
   python-backend:
     name: Python liveness backend tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # The runner has a Docker daemon, so the PostgreSQL migration and session
+    # persistence tests must run rather than silently skipping themselves.
+    env:
+      PAD_LIVENESS_REQUIRE_POSTGRES: '1'
     defaults:
       run:
         working-directory: pad_liveness_backend
@@ -100,7 +125,7 @@ jobs:
       - name: Install backend and test dependencies
         run: python -m pip install --requirement requirements-dev.txt
 
-      - name: Run backend behavior tests
+      - name: Run backend tests (SQLite behavior, OpenCV heuristics, PostgreSQL integration)
         run: python -m pytest --quiet
 
   android-client:

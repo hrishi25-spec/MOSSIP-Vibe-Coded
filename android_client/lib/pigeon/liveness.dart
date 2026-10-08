@@ -166,7 +166,7 @@ class _LivenessHostApiCodec extends StandardMessageCodec {
   @override
   Object? readValueOfType(int type, ReadBuffer buffer) {
     switch (type) {
-      case 128: 
+      case 128:
         return LivenessStartResult.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -177,7 +177,7 @@ class _LivenessHostApiCodec extends StandardMessageCodec {
 /// Pigeon bridge for the Android liveness gate (orchestration spec §7).
 ///
 /// Regenerate the host/flutter code with:
-///   dart run pigeon --input pigeon/liveness.dart
+///   ./tool/generate_pigeon.sh
 ///
 /// Rules encoded here (spec R1–R5):
 ///   * Frames NEVER cross this channel (R2) — preview is a Flutter Texture,
@@ -196,7 +196,8 @@ class LivenessHostApi {
 
   /// Start a gate for a role (RESIDENT | OPERATOR | SUPERVISOR).
   /// Returns the session id and the preview Texture id (R2).
-  Future<LivenessStartResult> startSession(String arg_role, String? arg_userId) async {
+  Future<LivenessStartResult> startSession(
+      String arg_role, String? arg_userId) async {
     final BasicMessageChannel<Object?> channel = BasicMessageChannel<Object?>(
         'dev.flutter.pigeon.LivenessHostApi.startSession', codec,
         binaryMessenger: _binaryMessenger);
@@ -228,8 +229,7 @@ class LivenessHostApi {
     final BasicMessageChannel<Object?> channel = BasicMessageChannel<Object?>(
         'dev.flutter.pigeon.LivenessHostApi.cancelSession', codec,
         binaryMessenger: _binaryMessenger);
-    final List<Object?>? replyList =
-        await channel.send(null) as List<Object?>?;
+    final List<Object?>? replyList = await channel.send(null) as List<Object?>?;
     if (replyList == null) {
       throw PlatformException(
         code: 'channel-error',
@@ -252,8 +252,7 @@ class LivenessHostApi {
     final BasicMessageChannel<Object?> channel = BasicMessageChannel<Object?>(
         'dev.flutter.pigeon.LivenessHostApi.isGateValid', codec,
         binaryMessenger: _binaryMessenger);
-    final List<Object?>? replyList =
-        await channel.send(null) as List<Object?>?;
+    final List<Object?>? replyList = await channel.send(null) as List<Object?>?;
     if (replyList == null) {
       throw PlatformException(
         code: 'channel-error',
@@ -280,8 +279,7 @@ class LivenessHostApi {
     final BasicMessageChannel<Object?> channel = BasicMessageChannel<Object?>(
         'dev.flutter.pigeon.LivenessHostApi.diagnosticsSnapshot', codec,
         binaryMessenger: _binaryMessenger);
-    final List<Object?>? replyList =
-        await channel.send(null) as List<Object?>?;
+    final List<Object?>? replyList = await channel.send(null) as List<Object?>?;
     if (replyList == null) {
       throw PlatformException(
         code: 'channel-error',
@@ -322,9 +320,9 @@ class _LivenessFlutterApiCodec extends StandardMessageCodec {
   @override
   Object? readValueOfType(int type, ReadBuffer buffer) {
     switch (type) {
-      case 128: 
+      case 128:
         return LivenessFinalResult.decode(readValue(buffer)!);
-      case 129: 
+      case 129:
         return LivenessStateEvent.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -341,7 +339,8 @@ abstract class LivenessFlutterApi {
   /// Terminal outcome (PASSED | TERMINAL_FAILURE | ABORTED).
   void onFinal(LivenessFinalResult result);
 
-  static void setup(LivenessFlutterApi? api, {BinaryMessenger? binaryMessenger}) {
+  static void setup(LivenessFlutterApi? api,
+      {BinaryMessenger? binaryMessenger}) {
     {
       final BasicMessageChannel<Object?> channel = BasicMessageChannel<Object?>(
           'dev.flutter.pigeon.LivenessFlutterApi.onState', codec,
@@ -351,9 +350,10 @@ abstract class LivenessFlutterApi {
       } else {
         channel.setMessageHandler((Object? message) async {
           assert(message != null,
-          'Argument for dev.flutter.pigeon.LivenessFlutterApi.onState was null.');
+              'Argument for dev.flutter.pigeon.LivenessFlutterApi.onState was null.');
           final List<Object?> args = (message as List<Object?>?)!;
-          final LivenessStateEvent? arg_event = (args[0] as LivenessStateEvent?);
+          final LivenessStateEvent? arg_event =
+              (args[0] as LivenessStateEvent?);
           assert(arg_event != null,
               'Argument for dev.flutter.pigeon.LivenessFlutterApi.onState was null, expected non-null LivenessStateEvent.');
           api.onState(arg_event!);
@@ -370,9 +370,10 @@ abstract class LivenessFlutterApi {
       } else {
         channel.setMessageHandler((Object? message) async {
           assert(message != null,
-          'Argument for dev.flutter.pigeon.LivenessFlutterApi.onFinal was null.');
+              'Argument for dev.flutter.pigeon.LivenessFlutterApi.onFinal was null.');
           final List<Object?> args = (message as List<Object?>?)!;
-          final LivenessFinalResult? arg_result = (args[0] as LivenessFinalResult?);
+          final LivenessFinalResult? arg_result =
+              (args[0] as LivenessFinalResult?);
           assert(arg_result != null,
               'Argument for dev.flutter.pigeon.LivenessFlutterApi.onFinal was null, expected non-null LivenessFinalResult.');
           api.onFinal(arg_result!);
