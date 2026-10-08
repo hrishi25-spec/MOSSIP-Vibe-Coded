@@ -461,7 +461,7 @@ Schema owned by **Flyway** (`src/main/resources/db/migration/`), validated by Hi
 Checked-in revisions: `V1__init_schema`, `V2__unify_passive_threshold`,
 `V3__challenge_window_15s`, `V4__session_policy_snapshot`, `V7__config_change_audit`,
 `V8__audit_logs_workflow_type`, `V9__audit_chain_immutability`.
-**Gap:** there is no `V5` or `V6` in the tree and nothing references them; the numbering has
+**Gap:** there are no `V5` or `V6` migration files; the numbering has
 gaps.
 
 | Table | Holds | Notable columns |
@@ -857,7 +857,7 @@ smoke tests.
 - The Java (0.80) and Python (0.75) passive thresholds and challenge budgets differ. *Gap.*
 - The Python backend has no frame-size cap equivalent to the Java 1280 px analysis limit, so an
   oversized frame costs proportionally more there. *Gap.*
-- Flyway revisions `V5`/`V6` are absent with no explanation. *Gap.*
+- Flyway revisions are present with gaps in the version sequence. *Gap.*
 
 **Verification and tooling**
 - There is no test suite for the boundary gate itself; its rules are validated by hand-built
