@@ -149,7 +149,14 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install pinned Android SDK packages
-        run: sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;25.1.8937393"
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            "ndk;25.1.8937393"
 
       - name: Set up Flutter 3.10.4 (Dart 3.0.3)
         uses: subosito/flutter-action@v2
