@@ -461,7 +461,7 @@ Schema owned by **Flyway** (`src/main/resources/db/migration/`), validated by Hi
 Checked-in revisions: `V1__init_schema`, `V2__unify_passive_threshold`,
 `V3__challenge_window_15s`, `V4__session_policy_snapshot`, `V7__config_change_audit`,
 `V8__audit_logs_workflow_type`, `V9__audit_chain_immutability`.
-**Gap:** there are no migration files for versions V5 and V6; the numbering has
+**Gap:** there are missing migration files in the version sequence; the numbering has
 gaps.
 
 | Table | Holds | Notable columns |
