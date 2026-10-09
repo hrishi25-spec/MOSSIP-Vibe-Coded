@@ -146,8 +146,15 @@ jobs:
           java-version: '17'
           cache: gradle
 
+      # The action's `packages` input defaults to 'tools platform-tools', and
+      # the `tools` package was removed from the SDK repository years ago, so
+      # sdkmanager exits 1 ("Failed to find package 'tools'") before any of the
+      # pinned packages below can be installed. Pin it to a package that still
+      # exists; the packages this build actually needs are installed next.
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
 
       - name: Install pinned Android SDK packages
         shell: bash

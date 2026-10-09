@@ -115,7 +115,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class LivenessPipelineIntegrationTest extends RawHttpSupport {
 
-    static final String ADMIN_KEY = "e2e-admin-key";
+    /** At least 32 characters: SecurityValidator rejects a shorter admin key on boot. */
+    static final String ADMIN_KEY = "e2e-admin-api-key-0123456789abcdef";
     /** Long enough to satisfy the key's minimum; the value itself is irrelevant. */
     static final String AUDIT_SECRET = "integration-test-audit-hmac-secret";
     /** Same header name as ConfigController.ADMIN_API_KEY_HEADER (package-private there). */

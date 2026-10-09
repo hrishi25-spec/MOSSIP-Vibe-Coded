@@ -459,8 +459,8 @@ curl -X PUT localhost:8000/api/v1/config/RESIDENT \
 
 Schema owned by **Flyway** (`src/main/resources/db/migration/`), validated by Hibernate.
 Checked-in revisions: `V1__init_schema`, `V2__unify_passive_threshold`,
-`V3__challenge_window_15s`, `V4__session_policy_snapshot`, `V5__init_audit_table, V6__add_device_id_to_user, V7__config_change_audit`,
-`V8__audit_logs_workflow_type`, `V9__audit_chain_immutability`.
+`V3__challenge_window_15s`, `V4__session_policy_snapshot`, `V5__init_audit_table`,
+`V7__config_change_audit`, `V8__audit_logs_workflow_type`, `V9__audit_chain_immutability`.
 **Gap:** there are missing migration files in the version sequence; the numbering has
 gaps.
 
