@@ -146,13 +146,27 @@ jobs:
           java-version: '17'
           cache: gradle
 
+      # The action's `packages` input defaults to 'tools platform-tools', and
+      # the `tools` package was removed from the SDK repository years ago, so
+      # sdkmanager exits 1 ("Failed to find package 'tools'") before any of the
+      # pinned packages below can be installed. Pin it to a package that still
+      # exists; the packages this build actually needs are installed next.
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+          # Explicit, though it is the action's default: the install step below
+          # relies on every SDK license already being accepted.
+          accept-android-sdk-licenses: 'true'
 
+      # The action already ran `sdkmanager --licenses`, so this step only
+      # installs the pinned packages. Its own `yes | sdkmanager --licenses`
+      # pipeline is gone on purpose: GitHub's `shell: bash` runs with
+      # `-o pipefail`, and `yes` is killed by SIGPIPE the moment sdkmanager
+      # finishes accepting, so the step exited 1 on the broken pipe instead of
+      # on any SDK error.
       - name: Install pinned Android SDK packages
-        shell: bash
         run: |
-          yes | sdkmanager --licenses
           sdkmanager --install \
             "platform-tools" \
             "platforms;android-34" \

@@ -1,1 +1,0 @@
-ALTER TABLE users ADD COLUMN device_id VARCHAR(64);
