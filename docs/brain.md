@@ -196,7 +196,11 @@ POST /api/v1/sessions/{sessionId}/frames
 5. If no face / multiple faces → retry
 6. Computes the passive score for this frame — MiniFASNet live-class
    probability when the model is loaded, the OpenCV quality heuristic otherwise
-   (`PassiveScoringService`, mode from `mosip.liveness.backend`)
+   (`PassiveScoringService`, mode from `mosip.liveness.backend`). The model's
+   probability is de-saturated above the default threshold by
+   `mosip.liveness.score-temperature` (`ProbabilityCalibration`) so a genuine
+   face reads a varied 0.88–0.97 instead of a flat `1.000`; `1` reports the raw
+   confidence
 7. Reads the session's scored frames and runs the **median-window decision**
    (`LivenessDecisionLogic.decidePassiveWindow`): until `passiveMinFrames` (5)
    scores exist the window is not decidable → `retry_passive`

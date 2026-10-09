@@ -8,11 +8,13 @@ import io.mosip.liveness.core.Frame;
 import io.mosip.liveness.core.LivenessErrorCode;
 import io.mosip.liveness.core.LivenessException;
 import io.mosip.liveness.core.PadVerdict;
+import io.mosip.liveness.core.ProbabilityCalibration;
 import io.mosip.liveness.metrics.PipelineTimers;
 import org.opencv.core.Mat;
 import org.opencv.imgproc.Imgproc;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -28,8 +30,10 @@ import java.util.Optional;
  * <ul>
  *   <li><b>{@code auto}</b> (default) — MiniFASNet-V2 via
  *       {@link OnnxMiniFasNetBackend} when the runtime and model load; the
- *       score is then the model's live-class probability, i.e. an actual
- *       liveness confidence.</li>
+ *       score is then the model's live-class probability, de-saturated by
+ *       {@code mosip.liveness.score-temperature} so an over-confident genuine
+ *       face does not simply read {@code 1.000} on every frame (see
+ *       {@link ProbabilityCalibration}).</li>
  *   <li><b>{@code heuristic}</b> — the original OpenCV quality formula
  *       (sharpness + brightness + eye symmetry), kept as an explicit fallback
  *       so tests, model-less CI and a missing/corrupt model degrade to
@@ -62,10 +66,21 @@ public class PassiveScoringService {
     /** Never load the model — always use the OpenCV heuristic. */
     public static final String MODE_HEURISTIC = "heuristic";
 
+    /**
+     * Default log-odds temperature for the passive score. The ONNX model's raw
+     * live-class probability pins at ~1.0 on a genuine face, so the score says
+     * nothing; dividing the log-odds above the default threshold by this spread
+     * them into a readable band without moving the operating point. {@code 1}
+     * disables the calibration and reports the raw model confidence.
+     */
+    public static final double DEFAULT_SCORE_TEMPERATURE = 4.0;
+
     private final LivenessEngineService heuristicScorer;
     private final String requestedMode;
     private final LivenessBackendSelection selection;
     private final String modelPath;
+    /** Applied to the model's live-class probability; 1 means raw confidence. */
+    private final double scoreTemperature;
 
     /** The resolved backend scorer; null when the heuristic is selected. */
     private volatile LivenessBackend model;
@@ -75,16 +90,31 @@ public class PassiveScoringService {
     /** Volatile so the per-frame fast path can skip the monitor entirely. */
     private volatile boolean resolved;
 
+    @Autowired
     public PassiveScoringService(LivenessEngineService heuristicScorer,
                                  @Value("${mosip.liveness.backend:auto}") String mode,
-                                 @Value("${mosip.liveness.model-path:}") String modelPath) {
+                                 @Value("${mosip.liveness.model-path:}") String modelPath,
+                                 @Value("${mosip.liveness.score-temperature:" + DEFAULT_SCORE_TEMPERATURE + "}")
+                                 double scoreTemperature) {
         this.heuristicScorer = heuristicScorer;
         this.requestedMode = mode;
         this.selection = LivenessBackendSelection.parse(mode);  // unknown value fails at bean creation
         this.modelPath = modelPath;
+        this.scoreTemperature = Double.isFinite(scoreTemperature) && scoreTemperature >= 1.0
+                ? scoreTemperature : DEFAULT_SCORE_TEMPERATURE;
         // Deliberately loads nothing here: bean creation must stay cheap,
         // and bean order is not guaranteed, so a constructor load would
         // also race the AppConfig warm-up. First use pays instead.
+    }
+
+    /**
+     * Convenience constructor for direct (non-Spring) wiring — the eval tools
+     * and the unit tests build the service by hand — defaulting the score
+     * calibration to {@link #DEFAULT_SCORE_TEMPERATURE}.
+     */
+    public PassiveScoringService(LivenessEngineService heuristicScorer,
+                                 String mode, String modelPath) {
+        this(heuristicScorer, mode, modelPath, DEFAULT_SCORE_TEMPERATURE);
     }
 
     /**
@@ -200,6 +230,11 @@ public class PassiveScoringService {
             if (modelPath != null && !modelPath.isBlank()) {
                 options.put(OnnxMiniFasNetBackend.OPTION_MODEL_PATH, modelPath.trim());
             }
+            // De-saturate the over-confident live-class probability above the
+            // default threshold (see ProbabilityCalibration). The SPI backends
+            // built from `selection` below are unaffected by this option.
+            options.put(OnnxMiniFasNetBackend.OPTION_TEMPERATURE,
+                    String.valueOf(scoreTemperature));
             backend.initialize(options);
             return backend;
         } catch (LivenessException e) {

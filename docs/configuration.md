@@ -174,9 +174,14 @@ derivable instead of asserted:
 
 1. **The score is a liveness confidence.** With `mosip.liveness.backend: auto`
    the passive score is MiniFASNet-V2's live-class probability (model
-   confidence), not the old image-quality heuristic. A threshold chosen against
-   the old scale does not transfer to the new scale — re-run the sweep after any
-   scorer change.
+   confidence), not the old image-quality heuristic. That probability is
+   badly calibrated — it pins at ~1.0 on a genuine face — so
+   `mosip.liveness.score-temperature` (default `4.0`) compresses the log-odds
+   above `0.80` into a readable band, anchored so `0.80` maps to itself and the
+   default operating point does not move (see `ProbabilityCalibration`). Set it
+   to `1` to score with the raw model confidence. A threshold chosen against
+   one scorer (or one temperature) does not transfer to another — re-run the
+   sweep after either change.
 2. **The decision is a median over 5 scored frames**, not a single frame, so
    calibration must evaluate the same windowed decision (it does).
 
@@ -343,7 +348,8 @@ env:
 |-----|---------|-------------|
 | `backend` | `auto` | Single selection for **both** wirings — the HTTP scorer (`PassiveScoringService`) and the `LivenessBackend` SPI bean (interop report F5): `auto` = bundled MiniFASNet ONNX when it loads, heuristic fallback otherwise (SPI bean: the scripted mock); `heuristic` = force the OpenCV quality heuristic (SPI bean: the mock); `mock` / `onnx-minifasnet-v2` / `mediapipe-facemesh` / `tflite-minifasnet` = that backend by its audit id on **both** paths. Explicit ids never fall back to another scorer — unavailable means a coded, fail-closed error (the engine maps it to its device error). Unknown values fail at startup. |
 | `model-path` | *(blank)* | Filesystem override for the model; blank uses the bundled `classpath:models/minifasnet_v2.onnx` (SHA-256 `d7b3cd9b…` verified on load). |
-| `passive-threshold` | `0.80` | Mirrors `LivenessConfig.DEFAULT_PASSIVE_THRESHOLD`; the `config_policies` DB row wins at runtime. |
+| `score-temperature` | `4.0` | Log-odds temperature that de-saturates the model's live-class probability **above** `0.80` (`ProbabilityCalibration`). The raw MiniFASNet score sits at 0.99–0.9999 on an ordinary genuine face, so the console showed a flat `1.000` with no information. The map is anchored at the default threshold (0.80 → 0.80), so the pass/fail verdict at `t ≤ 0.80` is unchanged; `1` reports the raw model confidence and `>1` spreads more. Per-workflow thresholds above 0.80 are applied to the calibrated scale and therefore demand a slightly higher raw confidence. |
+| `passive-threshold` | `0.80` | Mirrors `LivenessConfig.DEFAULT_PASSIVE_THRESHOLD`; the `config_policies` DB row wins at runtime. Also the anchor of `score-temperature`'s compression, so that default is preserved exactly. |
 | `min-face-quality`, `passive-min-frames`, `passive-window-frames`, `min-challenge-count`, `challenge-timeout-ms`, `max-retries` | see yml | Engine defaults for the embedded (library) path. |
 | `diagnostics-enabled` (`LIVENESS_DIAGNOSTICS_ENABLED`) | `false` | **Diagnostic mode (opt-in, local)** — orchestration spec §10. When true, the service retains raw per-frame scores, timings, FPS and the scorer delegate in a bounded ring (**no pixels**) and `GET /api/v1/diagnostics` serves the snapshot to **loopback callers only**; disabled or remote callers get the identical empty 404, so the mode never leaks its own existence. The console's debug panel appears only when both gates pass. |
 

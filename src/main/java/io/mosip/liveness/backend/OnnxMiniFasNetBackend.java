@@ -9,6 +9,7 @@ import io.mosip.liveness.core.LivenessErrorCode;
 import io.mosip.liveness.core.LivenessException;
 import io.mosip.liveness.core.PadAttackType;
 import io.mosip.liveness.core.PadVerdict;
+import io.mosip.liveness.core.ProbabilityCalibration;
 
 import org.opencv.core.Core;
 import org.opencv.core.CvType;
@@ -66,6 +67,11 @@ import java.util.Map;
  *       published digest when the bundled resource is used, and is skipped for a
  *       custom {@code modelPath} unless supplied explicitly</li>
  *   <li>{@code faceCascadePath} – path to the face Haar cascade XML (auto-detected if absent)</li>
+ *   <li>{@code temperature} – optional log-odds temperature that de-saturates the
+ *       live-class probability above the default threshold; {@code 1} (the
+ *       default) leaves the raw model confidence untouched. See
+ *       {@link ProbabilityCalibration} for why the raw value is unusable as a
+ *       score (it pins at 1.000 on a genuine face).</li>
  * </ul>
  */
 public final class OnnxMiniFasNetBackend implements LivenessBackend {
@@ -74,6 +80,14 @@ public final class OnnxMiniFasNetBackend implements LivenessBackend {
     public static final String OPTION_MODEL_RESOURCE = "modelResource";
     public static final String OPTION_EXPECTED_SHA256 = "expectedSha256";
     public static final String OPTION_FACE_CASCADE_PATH = "faceCascadePath";
+
+    /**
+     * Optional log-odds temperature that de-saturates the live-class
+     * probability above {@link ProbabilityCalibration#DEFAULT_PIVOT} without
+     * moving that operating point. Absent (or {@code 1}) leaves every score
+     * exactly as the model produced it.
+     */
+    public static final String OPTION_TEMPERATURE = "temperature";
 
     /** Bundled model location on the classpath. */
     public static final String DEFAULT_MODEL_RESOURCE = "models/minifasnet_v2.onnx";
@@ -100,6 +114,8 @@ public final class OnnxMiniFasNetBackend implements LivenessBackend {
     private OrtEnvironment env;
     private OrtSession session;
     private CascadeClassifier faceCascade;
+    /** Applied to the live-class probability in {@link #scorePassiveLiveness}; identity by default. */
+    private ProbabilityCalibration calibration = ProbabilityCalibration.identity();
     private volatile boolean ready;
 
     /** @return true when the ONNX Runtime classes are present on the classpath. */
@@ -135,6 +151,7 @@ public final class OnnxMiniFasNetBackend implements LivenessBackend {
         }
         try {
             boolean customPath = options != null && options.containsKey(OPTION_MODEL_PATH);
+            calibration = parseCalibration(options);
             byte[] model = readModel(options);
 
             String expected = options != null ? options.get(OPTION_EXPECTED_SHA256) : null;
@@ -164,6 +181,32 @@ public final class OnnxMiniFasNetBackend implements LivenessBackend {
             ready = false;
             throw new LivenessException(LivenessErrorCode.ENGINE_INTERNAL_ERROR,
                     "Failed to load the liveness model: " + t.getMessage());
+        }
+    }
+
+    /**
+     * Reads {@link #OPTION_TEMPERATURE} (defaulting to the identity) into a
+     * {@link ProbabilityCalibration}. A malformed or sub-1 value is a
+     * configuration error, not a quiet fallback: it would otherwise look
+     * exactly like "calibration is on" while doing nothing.
+     */
+    private static ProbabilityCalibration parseCalibration(Map<String, String> options) {
+        String raw = options != null ? options.get(OPTION_TEMPERATURE) : null;
+        if (raw == null || raw.isBlank()) {
+            return ProbabilityCalibration.identity();
+        }
+        double temperature;
+        try {
+            temperature = Double.parseDouble(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new LivenessException(LivenessErrorCode.ENGINE_INTERNAL_ERROR,
+                    "Invalid " + OPTION_TEMPERATURE + " value '" + raw + "'");
+        }
+        try {
+            return ProbabilityCalibration.ofTemperature(temperature);
+        } catch (IllegalArgumentException e) {
+            throw new LivenessException(LivenessErrorCode.ENGINE_INTERNAL_ERROR,
+                    "Invalid " + OPTION_TEMPERATURE + " value: " + e.getMessage());
         }
     }
 
@@ -499,6 +542,13 @@ public final class OnnxMiniFasNetBackend implements LivenessBackend {
         }
     }
 
+    /**
+     * Liveness score for the frame: the live-class probability, de-saturated by
+     * the configured {@link #OPTION_TEMPERATURE calibration} (the identity when
+     * unset). The PAD verdict in {@link #assessPad} deliberately keeps the raw
+     * probabilities — it decides by class ranking, which a monotonic
+     * temperature cannot change.
+     */
     @Override
     public double scorePassiveLiveness(Frame frame, FaceSignals signals) {
         if (signals != null && signals.faceCount() != 1) {
@@ -506,7 +556,7 @@ public final class OnnxMiniFasNetBackend implements LivenessBackend {
         }
         double[] p = probabilitiesFor(frame);
         if (p == null) return 0.0;
-        return p[CLASS_LIVE];
+        return calibration.apply(p[CLASS_LIVE]);
     }
 
     @Override

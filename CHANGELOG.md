@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - 2026-10-06
 
+### Fixed — Passive liveness score pinned at `1.000` on genuine faces
+
+- The MiniFASNet-V2 live-class probability is over-confident: on an ordinary
+  genuine webcam face it sits at 0.99–0.9999, so the console's decision log
+  showed `score=1.000` on every frame and the number carried no information.
+  Added `ProbabilityCalibration` — a log-odds temperature anchored at the
+  default threshold — and wired it through `PassiveScoringService` /
+  `OnnxMiniFasNetBackend` as `mosip.liveness.score-temperature` (default
+  `4.0`). The map is continuous, strictly increasing and a fixed point at
+  `0.80`, so every pass/fail verdict at `t <= 0.80` is unchanged while the
+  genuine tail spreads into a readable band (the committed genuine fixture goes
+  `0.99499` → `0.9139`, the print fixture's live probability stays `0.00055`).
+  A per-workflow threshold above 0.80 is applied to the calibrated scale, so it
+  demands a slightly higher raw confidence — the existing "recalibrate after a
+  scorer change" rule applies. Set the key to `1` to report the raw model
+  confidence. The PAD verdict deliberately keeps the raw probabilities (it
+  decides by class ranking, which a monotonic temperature cannot change), so
+  attack rejection — and the audit trail's PAD confidences — are untouched.
+- Tests: `ProbabilityCalibrationTest` (10 — identity, below/at-pivot
+  pass-through, threshold-verdict preservation, monotonicity, the spread of a
+  saturated genuine score, attack passthrough, NaN, and constructor
+  validation) and two `OnnxMiniFasNetBackendTest` cases pinning the calibrated
+  genuine score above the threshold while staying below the raw one, plus a
+  malformed-temperature configuration error.
+
 ### Added — One backend-selection key for both wirings (interop report F5)
 
 - `mosip.liveness.backend` now selects the backend for **both** paths behind

@@ -5,6 +5,7 @@ import io.mosip.liveness.core.Frame;
 import io.mosip.liveness.core.LivenessErrorCode;
 import io.mosip.liveness.core.LivenessException;
 import io.mosip.liveness.core.PadVerdict;
+import io.mosip.liveness.core.ProbabilityCalibration;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.opencv.core.Mat;
@@ -186,5 +187,56 @@ class OnnxMiniFasNetBackendTest {
         } finally {
             backend.shutdown();
         }
+    }
+
+    /** The committed genuine face as an RGB_888 {@link Frame}. */
+    private static Frame realFaceFrame() {
+        Mat bgr = Imgcodecs.imread("src/test/resources/fixtures/real-face.jpg");
+        assertTrue(!bgr.empty(), "fixture image must load");
+        Mat rgb = new Mat();
+        Imgproc.cvtColor(bgr, rgb, Imgproc.COLOR_BGR2RGB);
+        byte[] data = new byte[rgb.rows() * rgb.cols() * rgb.channels()];
+        rgb.get(0, 0, data);
+        return Frame.of(data, rgb.cols(), rgb.rows(), Frame.Format.RGB_888,
+                System.currentTimeMillis(), 0);
+    }
+
+    @Test
+    void temperatureDeSaturatesTheGenuineScoreButKeepsItAboveTheThreshold() {
+        OnnxMiniFasNetBackend raw = new OnnxMiniFasNetBackend();
+        raw.initialize(Map.of(OnnxMiniFasNetBackend.OPTION_TEMPERATURE, "1"));
+        double rawScore;
+        try {
+            Frame frame = realFaceFrame();
+            rawScore = raw.scorePassiveLiveness(frame, raw.analyzeFrame(frame));
+        } finally {
+            raw.shutdown();
+        }
+
+        OnnxMiniFasNetBackend calibrated = new OnnxMiniFasNetBackend();
+        calibrated.initialize(Map.of(OnnxMiniFasNetBackend.OPTION_TEMPERATURE, "4.0"));
+        double calibratedScore;
+        try {
+            Frame frame = realFaceFrame();
+            calibratedScore = calibrated.scorePassiveLiveness(frame, calibrated.analyzeFrame(frame));
+        } finally {
+            calibrated.shutdown();
+        }
+
+        assertTrue(rawScore > 0.98, "the raw model is expected to be over-confident, was " + rawScore);
+        assertTrue(calibratedScore > ProbabilityCalibration.DEFAULT_PIVOT,
+                "a genuine face must still clear the default threshold, was " + calibratedScore);
+        assertTrue(calibratedScore < rawScore - 0.03,
+                "calibration must pull the saturated top down: raw=" + rawScore
+                        + " calibrated=" + calibratedScore);
+    }
+
+    @Test
+    void invalidTemperatureIsAConfigurationError() {
+        OnnxMiniFasNetBackend backend = new OnnxMiniFasNetBackend();
+        assertThrows(LivenessException.class,
+                () -> backend.initialize(Map.of(OnnxMiniFasNetBackend.OPTION_TEMPERATURE, "0.5")));
+        assertThrows(LivenessException.class,
+                () -> backend.initialize(Map.of(OnnxMiniFasNetBackend.OPTION_TEMPERATURE, "hot")));
     }
 }

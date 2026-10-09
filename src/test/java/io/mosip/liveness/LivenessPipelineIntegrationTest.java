@@ -47,8 +47,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>Each test uses a different workflow type where config is mutated, so those
  * get independent config rows and the tests stay order-independent:</p>
  * <ul>
- *   <li>RESIDENT (default policy) — the real fixture face scores ~0.99 &gt;
- *       0.80, so the median window must reach {@code proceed} → PASSED.</li>
+ *   <li>RESIDENT (default policy) — the real fixture face scores ~0.91 &gt;
+ *       0.80 on the calibrated scale (raw ~0.99), so the median window must
+ *       reach {@code proceed} → PASSED.</li>
  *   <li>SUPERVISOR with {@code passiveThreshold=1.0} — the median can never
  *       clear it, so the pipeline must escalate and open a challenge; static
  *       frames cannot perform the action, so validation stays {@code continue}.</li>
