@@ -3,7 +3,10 @@ target/
 *.iml
 .idea/
 .vscode/
-models/
+# ML model artifacts. Anchored to the repository root: an unanchored `models/`
+# also matched src/main/java/io/mosip/liveness/models/ and silently excluded
+# the JPA entity/enum packages from version control.
+/models/
 
 # Training data (face images must never be committed)
 training/data/
@@ -16,3 +19,8 @@ __pycache__/
 # Backup files
 *.bak
 *.log
+target/
+vendor/SKILLS-INTEGRATION.zip
+target/
+target/
+.DS_Store

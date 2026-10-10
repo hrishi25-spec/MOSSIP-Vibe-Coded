@@ -83,15 +83,59 @@ pip install -r requirements.txt
 # start a local Postgres however you prefer, then:
 cp .env.example .env      # point POSTGRES_HOST etc. at your instance
 
-# create tables + seed default policies (dev-only shortcut)
-python -m app.db.init_db
-
-# or, for a proper migration history:
-alembic revision --autogenerate -m "init"
+# apply the schema migrations (the baseline revision ships with the repo)
 alembic upgrade head
+
+# optional dev shortcut: create tables directly and seed default policies
+# python -m app.db.init_db
 
 uvicorn app.main:app --reload
 ```
+
+Alembic is the source of truth for the schema. A database that was bootstrapped
+with `app.db.init_db` has the tables but no `alembic_version` row, so adopt it
+with `alembic stamp head` before running further migrations:
+
+```bash
+alembic stamp head    # only for databases created by app.db.init_db
+```
+
+## Running tests
+
+The suite has four parts:
+
+- **API behaviour** (`tests/test_liveness_api.py`) uses an isolated in-memory
+  SQLite database and stubs the model engines, so it needs neither PostgreSQL
+  nor camera hardware.
+- **Liveness/PAD heuristics** (`tests/test_opencv_heuristics.py`) drives the real
+  OpenCV engines over procedurally generated image fixtures — no real faces, no
+  downloads — and asserts branch behaviour and run-to-run determinism, not model
+  quality.
+- **PostgreSQL integration** (`tests/test_postgres_migrations.py`,
+  `tests/test_postgres_persistence.py`) starts a throwaway `postgres:16-alpine`
+  container, applies the migrations to it with the real `alembic` CLI, and then
+  checks the migrated schema and session persistence against it. These need a
+  Docker daemon; without one they skip. Each module gets its own database inside
+  the one container, because the migration tests downgrade the schema.
+- **Application imports** (`tests/test_app_imports.py`) imports the documented
+  entry points in a fresh interpreter, which is what `uvicorn app.main:app` and
+  `python -m app.db.init_db` do.
+
+Install the pinned test dependencies and run them from this directory:
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+Set `PAD_LIVENESS_REQUIRE_POSTGRES=1` to make an unavailable Docker daemon fail
+the run instead of skipping the PostgreSQL tests. CI sets it, so those tests
+cannot disappear silently.
+
+The heuristic thresholds are placeholder calibrations measured on those
+synthetic fixtures (see `app/services/pad_engine.py`); recalibrate them against
+real capture hardware before reading anything into a verdict.
 
 ## Example flow (curl)
 

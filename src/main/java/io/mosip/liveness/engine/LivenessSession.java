@@ -188,7 +188,8 @@ final class LivenessSession {
 
     SessionSummary summarize(long durationMs) {
         return new SessionSummary(sessionId, workflow, outcome, escalated, lastMedianScore,
-                padAttackType, challengeAttempts, challengesPassed, challengesFailed, durationMs);
+                padAttackType, challengeAttempts, challengesPassed, challengesFailed, durationMs,
+                challengeProgressEvents());
     }
 
     // G7: per-session frame sampling counter

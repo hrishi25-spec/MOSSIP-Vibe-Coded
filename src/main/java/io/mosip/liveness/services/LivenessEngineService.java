@@ -55,35 +55,104 @@ public class LivenessEngineService {
     }
 
     /**
+     * Floor for how far the face box must travel, in pixels, for a head-turn
+     * challenge. The effective requirement scales with face size (see
+     * {@link #TURN_WIDTH_FRACTION}); this floor keeps small/distant faces workable.
+     */
+    private static final double MIN_TURN_DELTA_PX = 12.0;
+
+    /** Floor for gaze-direction travel, in pixels. */
+    private static final double MIN_GAZE_DELTA_PX = 8.0;
+
+    /**
+     * Head-turn travel required, as a fraction of the detected face width.
+     * A fixed pixel threshold behaved differently on every camera and face size:
+     * it was nearly unreachable on a low-resolution feed and trivially satisfied
+     * (by detection jitter) on a close-up. A real head turn moves the box by
+     * roughly a fifth of the face width, so make the bar proportional.
+     */
+    private static final double TURN_WIDTH_FRACTION = 0.20;
+
+    /** Gaze-direction travel required, as a fraction of the detected face width. */
+    private static final double GAZE_WIDTH_FRACTION = 0.12;
+
+    /**
      * Validate active challenge (blink, smile, turn, etc.) across a sequence of frames.
      */
     public boolean validateActive(ChallengeType challengeType, List<Mat> frames, ImageUtils imageUtils) {
-        if (frames.size() < 2) return false;
-
-        // Get bounding boxes for all frames
+        // Frames where no face can be found are dropped rather than failing the
+        // whole challenge. Haar tracking regularly drops the face for a frame or
+        // two mid-turn, and the previous "if any frame has no face, return false"
+        // rule rejected exactly the genuine turns we want to accept. Enough frames
+        // must still show a face for the measurement to mean anything.
+        List<Mat> usable = new ArrayList<>();
         List<int[]> boxes = new ArrayList<>();
         for (Mat f : frames) {
             FaceObservation obs = observeFace(f, imageUtils);
-            if (obs.bbox() == null) return false;
+            if (obs.bbox() == null) continue;
+            usable.add(f);
             boxes.add(obs.bbox());
         }
+        if (usable.size() < 2) return false;
+
+        double faceWidth = medianWidth(boxes);
+        double turnDelta = Math.max(MIN_TURN_DELTA_PX, TURN_WIDTH_FRACTION * faceWidth);
+        double gazeDelta = Math.max(MIN_GAZE_DELTA_PX, GAZE_WIDTH_FRACTION * faceWidth);
+        double excursion = peakExcursion(boxes);
 
         return switch (challengeType) {
-            case BLINK -> checkBlink(frames, boxes, imageUtils);
-            case TURN_LEFT -> {
-                double delta = boxes.get(boxes.size() - 1)[0] - boxes.get(0)[0];
-                yield delta < -15;
-            }
-            case TURN_RIGHT -> {
-                double delta = boxes.get(boxes.size() - 1)[0] - boxes.get(0)[0];
-                yield delta > 15;
-            }
-            case SMILE -> checkSmile(frames, boxes, imageUtils);
-            default -> {
-                double delta = boxes.get(boxes.size() - 1)[0] - boxes.get(0)[0];
-                yield Math.abs(delta) > 10;
-            }
+            case BLINK -> checkBlink(usable, boxes, imageUtils);
+
+            // Frames arrive as raw, un-mirrored camera pixels. A camera sees the
+            // subject the way another person does: the subject's own LEFT appears
+            // on the image's RIGHT. Turning one's head to one's own left therefore
+            // moves the face box toward LARGER x.
+            //
+            // Challenge labels are egocentric — the UI tells the person "turn
+            // left", meaning the person's own left — so they map as below. These
+            // were previously swapped, which made every instruction read backwards.
+            case TURN_LEFT -> excursion > turnDelta;
+            case TURN_RIGHT -> excursion < -turnDelta;
+            case LOOK_LEFT -> excursion > gazeDelta;
+            case LOOK_RIGHT -> excursion < -gazeDelta;
+
+            // Vertical gaze cannot be recovered from horizontal box movement.
+            // Fail closed rather than passing on an unrelated sideways motion.
+            case LOOK_UP, LOOK_DOWN -> false;
+
+            case SMILE -> checkSmile(usable, boxes, imageUtils);
+
+            // LOOK_DIRECTION is direction-agnostic by contract.
+            default -> Math.abs(excursion) > gazeDelta;
         };
+    }
+
+    /**
+     * Signed horizontal excursion of the face box, relative to the baseline frame
+     * (the first frame in which a face was found, when the subject is neutral).
+     *
+     * <p>The value with the largest magnitude is returned, not the last frame's
+     * displacement: a person who turns and returns to centre — or who reaches the
+     * pose part-way through the burst — still registers the turn, whereas
+     * measuring only first-vs-last frames cancelled it out.</p>
+     *
+     * <p>Coordinates are the raw image's own: x grows to the image's right.</p>
+     */
+    private static double peakExcursion(List<int[]> boxes) {
+        int baselineX = boxes.get(0)[0];
+        double peak = 0.0;
+        for (int[] b : boxes) {
+            double dx = b[0] - baselineX;
+            if (Math.abs(dx) > Math.abs(peak)) peak = dx;
+        }
+        return peak;
+    }
+
+    /** Median face-box width, used to scale the movement thresholds. */
+    private static double medianWidth(List<int[]> boxes) {
+        double[] widths = boxes.stream().mapToDouble(b -> b[2]).sorted().toArray();
+        int n = widths.length;
+        return n % 2 == 1 ? widths[n / 2] : 0.5 * (widths[n / 2 - 1] + widths[n / 2]);
     }
 
     private boolean checkBlink(List<Mat> frames, List<int[]> boxes, ImageUtils imageUtils) {

@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Inline empty icon: stops the browser from requesting /favicon.ico on every load. -->
+<link rel="icon" href="data:,">
+<title>MOSIP Face Liveness &amp; PAD — Test Console</title>
+<link rel="stylesheet" href="console.css">
+</head>
+<body>
+
+<header>
+  <h1>MOSIP Face Liveness &amp; PAD — Test Console</h1>
+  <span class="pill" id="pill-health">checking…</span>
+  <span class="pill" id="pill-engine">engine…</span>
+  <span class="pill" id="pill-chain">chain…</span>
+  <span class="spacer"></span>
+  <span class="pill" id="pill-session">no session</span>
+</header>
+
+<main>
+  <div>
+    <section>
+      <h2>Capture</h2>
+      <div class="body">
+        <div id="engine-warn" class="warnbox" hidden></div>
+
+        <div class="steps">
+          <span class="step" id="s1">1 · Session</span>
+          <span class="step" id="s2">2 · Passive liveness</span>
+          <span class="step" id="s3">3 · Active challenge</span>
+          <span class="step" id="s4">4 · Verdict</span>
+        </div>
+
+        <video id="video" autoplay playsinline muted></video>
+
+        <div class="row mt12">
+          <label class="field">Workflow
+            <select id="workflow">
+              <option value="RESIDENT">RESIDENT</option>
+              <option value="OPERATOR">OPERATOR</option>
+              <option value="SUPERVISOR">SUPERVISOR</option>
+            </select>
+          </label>
+          <label class="field">Device ID
+            <input id="deviceId" value="L1-CAM-01">
+          </label>
+        </div>
+
+        <div class="row mt12">
+          <button id="btn-camera">Start camera</button>
+          <button id="btn-run" class="primary" disabled>Run liveness check</button>
+          <button id="btn-stop" class="danger" disabled>Stop</button>
+        </div>
+
+        <div id="verdict" class="verdict mt14" hidden>
+          <div class="action" id="verdict-action"></div>
+          <div class="msg" id="verdict-msg"></div>
+        </div>
+
+        <p class="hint">
+          The preview is <b>mirrored</b> (like a selfie) so it matches the instruction —
+          turn your head to <em>your own</em> left when asked to turn left. The frames sent
+          to the engine stay raw and un-mirrored.
+        </p>
+        <p class="hint">
+          The page must be opened at <b>http://localhost:8000</b> — browsers only expose
+          the camera on a secure origin, and <code>localhost</code> counts as one.
+        </p>
+      </div>
+    </section>
+
+    <section class="mt16">
+      <h2>Operational metrics</h2>
+      <div class="body"><dl class="kv" id="metrics"><dt>—</dt><dd>—</dd></dl>
+        <div class="row mt12"><button id="btn-metrics">Refresh metrics</button></div>
+      </div>
+    </section>
+
+    <section class="mt16" id="diag-section" hidden>
+      <h2>Diagnostics — raw scores</h2>
+      <div class="body">
+        <dl class="kv" id="diag"><dt>—</dt><dd>—</dd></dl>
+        <pre id="diag-frames">No frames recorded yet.</pre>
+        <div class="row mt12"><button id="btn-diag">Refresh diagnostics</button></div>
+        <p class="hint">
+          Diagnostic mode is <b>opt-in</b> (<code>mosip.liveness.diagnostics-enabled</code>,
+          off by default) and <b>local only</b>: <code>GET /api/v1/diagnostics</code>
+          answers loopback callers while enabled and the same 404 otherwise, so this
+          section appears only when both hold. It shows raw per-frame scores, timings,
+          FPS and the scorer delegate for troubleshooting (orchestration spec §10) —
+          <b>no pixels</b> are ever retained, and responses are <code>no-store</code>.
+        </p>
+      </div>
+    </section>
+
+    <section class="mt16">
+      <h2>Request budget</h2>
+      <div class="body">
+        <div id="rl-buckets" class="rl-buckets">No limited requests yet.</div>
+        <p class="hint">The service publishes <code>X-RateLimit-Limit</code>,
+          <code>-Remaining</code> and <code>-Reset</code> on session creation and on frame /
+          challenge submissions. Capture faster than the window and the frame budget empties —
+          the console shows the limiter running down before the 429 arrives.</p>
+      </div>
+    </section>
+
+    <section class="mt16">
+      <h2>Config policy</h2>
+      <div class="body">
+        <div class="row">
+          <label class="field">Workflow
+            <select id="cfg-workflow">
+              <option value="RESIDENT">RESIDENT</option>
+              <option value="OPERATOR">OPERATOR</option>
+              <option value="SUPERVISOR">SUPERVISOR</option>
+            </select>
+          </label>
+          <label class="field">Admin API key (MOSIP_ADMIN_API_KEY)
+            <input id="cfg-key" type="password" autocomplete="off" placeholder="required to save">
+            <span id="cfg-key-hint" class="key-hint" hidden></span>
+          </label>
+        </div>
+        <div class="row mt12">
+          <label class="field">Passive threshold (0–1)
+            <input id="cfg-threshold" type="number" min="0" max="1" step="0.01">
+          </label>
+          <label class="field">Challenge timeout (ms)
+            <input id="cfg-timeout" type="number" min="1000" step="500">
+          </label>
+        </div>
+        <div class="row mt12">
+          <label class="field">Min challenges
+            <input id="cfg-min-challenges" type="number" min="1" step="1">
+          </label>
+          <label class="field">Max retries
+            <input id="cfg-retries" type="number" min="0" step="1">
+          </label>
+          <label class="field">On repeated failure
+            <select id="cfg-failure">
+              <option value="LOCK">LOCK</option>
+              <option value="ESCALATE">ESCALATE</option>
+              <option value="ALLOW_RETRY">ALLOW_RETRY</option>
+            </select>
+          </label>
+        </div>
+        <div class="row mt12">
+          <label class="chk"><input type="checkbox" id="cfg-liveness"> liveness enabled</label>
+          <label class="chk"><input type="checkbox" id="cfg-active"> active liveness</label>
+        </div>
+        <div class="row mt12">
+          <label class="chk"><input type="checkbox" id="cfg-ch-blink"> blink</label>
+          <label class="chk"><input type="checkbox" id="cfg-ch-smile"> smile</label>
+          <label class="chk"><input type="checkbox" id="cfg-ch-left"> turn_left</label>
+          <label class="chk"><input type="checkbox" id="cfg-ch-right"> turn_right</label>
+        </div>
+        <div id="cfg-diff" class="cfg-diff" hidden></div>
+        <div class="row mt12">
+          <button id="btn-cfg-load">Load policy</button>
+          <button id="btn-cfg-save" class="primary">Save policy</button>
+          <button id="btn-cfg-discard">Discard edits</button>
+          <button id="btn-cfg-forget-key">Forget key</button>
+        </div>
+        <div id="cfg-status" class="cfg-status"></div>
+        <p class="hint">Saving issues a <code>PUT</code> with the admin key; loading is an
+          open <code>GET</code>. The key stays in this tab's sessionStorage — it is never
+          written to the decision log, and the field shows only a masked tail so a screen
+          share or screenshot can't leak it.</p>
+      </div>
+    </section>
+
+    <section class="mt16">
+      <h2>Policy change history</h2>
+      <div class="body">
+        <div class="row">
+          <button id="btn-cfg-audit">Refresh change history</button>
+          <label class="row-label" for="cfg-audit-workflow">Workflow</label>
+          <select id="cfg-audit-workflow">
+            <option value="">All workflows</option>
+            <option value="RESIDENT">RESIDENT</option>
+            <option value="OPERATOR">OPERATOR</option>
+            <option value="SUPERVISOR">SUPERVISOR</option>
+          </select>
+        </div>
+        <pre id="cfg-audit">No policy changes recorded yet.</pre>
+        <p class="hint">Every <code>PUT</code> to <code>/api/v1/config/{workflow}</code> is
+          recorded with the fields that moved, their previous and new values, and a
+          fingerprint of the admin key that made the change, shown next to
+          each entry so it is clear at a glance which key did the edit.
+          Edits that lower the passive threshold or switch liveness off are
+          marked <code>[risk: HIGH]</code>, with the reason. The history
+          loads with the page, so the most recent edit is visible without
+          clicking refresh.</p>
+      </div>
+    </section>
+
+    <section class="mt16">
+      <h2>Chain integrity</h2>
+      <div class="body">
+        <pre id="chain-details">Checking chain…</pre>
+        <div class="row mt12">
+          <button id="btn-chain-refresh">Refresh</button>
+        </div>
+        <p class="hint">The config audit trail is tamper-evident — each entry is hashed over its predecessor
+          (<code>prev_hash → entry_hash</code>). The endpoint verifies the whole chain, so a break beyond the
+          visible audit-feed page is still detected. The header badge is green when every link checks out,
+          amber while a previous key is configured for verification, and red on a tamper or a missing row.
+          The details show whether any historical entries still need the previous key.</p>
+      </div>
+    </section>
+  </div>
+
+  <div>
+    <section>
+      <h2>Decision log</h2>
+      <div class="body"><pre id="log">Ready.</pre></div>
+    </section>
+
+    <section class="mt16">
+      <h2>Last frame verdict</h2>
+      <div class="body"><dl class="kv" id="last"><dt>—</dt><dd>—</dd></dl></div>
+    </section>
+
+    <section class="mt16">
+      <h2>Audit trail</h2>
+      <div class="body">
+        <pre id="audit">No session yet.</pre>
+        <div class="row mt12">
+          <button id="btn-audit">Refresh audit</button>
+          <button id="btn-close">Close session</button>
+        </div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script src="console.js"></script>
+</body>
+</html>

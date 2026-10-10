@@ -1,5 +1,7 @@
 package io.mosip.liveness.services;
 
+import io.mosip.liveness.metrics.PipelineTimers;
+
 import org.opencv.core.*;
 import org.opencv.imgcodecs.Imgcodecs;
 import org.opencv.imgproc.Imgproc;
@@ -8,16 +10,38 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.Base64;
 
 /**
  * Shared helpers for decoding and quality-checking incoming frames.
  * Maps to the Python framework's image_utils.py.
+ *
+ * <p>Haar cascade data files are resolved from the classpath first (drop them in
+ * {@code src/main/resources/}) and then from the filesystem, so the same build
+ * works when the service is launched from any working directory.</p>
  */
 @Service
 public class ImageUtils {
 
     private static final Logger log = LoggerFactory.getLogger(ImageUtils.class);
+
+    static final String FACE_CASCADE = "haarcascade_frontalface_default.xml";
+    static final String EYE_CASCADE = "haarcascade_eye.xml";
+
+    /** Hard cap on a decoded (binary) frame payload, before base64. */
+    static final int MAX_FRAME_BYTES = 6_000_000;
+    /** Hard cap per image dimension — guards against decompression bombs
+     *  (a tiny PNG that expands to a huge bitmap). */
+    static final int MAX_FRAME_DIMENSION = 8192;
+    /** Hard cap on total pixels (cols*rows) for the same reason. */
+    static final long MAX_FRAME_PIXELS = 40_000_000L;
+    /** Frames larger than this are downscaled before analysis so a 1080p/4K
+     *  camera costs the same CPU as a 640x480 one (low-end devices). */
+    static final int ANALYSIS_MAX_DIMENSION = 1280;
 
     // Lazy-load cascades so Mockito can proxy this class without triggering native lib loading
     private volatile CascadeClassifier faceCascade;
@@ -27,12 +51,7 @@ public class ImageUtils {
         if (faceCascade == null) {
             synchronized (this) {
                 if (faceCascade == null) {
-                    try {
-                        faceCascade = new CascadeClassifier("haarcascade_frontalface_default.xml");
-                    } catch (Exception e) {
-                        log.warn("Could not load face cascade", e);
-                        faceCascade = new CascadeClassifier(); // empty, .empty() returns true
-                    }
+                    faceCascade = loadCascade(FACE_CASCADE);
                 }
             }
         }
@@ -43,16 +62,75 @@ public class ImageUtils {
         if (eyeCascade == null) {
             synchronized (this) {
                 if (eyeCascade == null) {
-                    try {
-                        eyeCascade = new CascadeClassifier("haarcascade_eye.xml");
-                    } catch (Exception e) {
-                        log.warn("Could not load eye cascade", e);
-                        eyeCascade = new CascadeClassifier();
-                    }
+                    eyeCascade = loadCascade(EYE_CASCADE);
                 }
             }
         }
         return eyeCascade;
+    }
+
+    /**
+     * Resolve a Haar cascade from the classpath, then the filesystem.
+     *
+     * <p>These XML files are not shipped with OpenCV's Java bindings, so a build
+     * without them cannot detect faces and every frame will be reported as
+     * "no face detected". An empty classifier is returned in that case (rather
+     * than throwing) so the rest of the service still serves traffic.</p>
+     */
+    private CascadeClassifier loadCascade(String resourceName) {
+        // 1) classpath — the preferred location; survives packaging and any CWD
+        try (InputStream in = getClass().getClassLoader().getResourceAsStream(resourceName)) {
+            if (in != null) {
+                Path tmp = Files.createTempFile("cascade-", ".xml");
+                try {
+                    Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
+                    // CascadeClassifier reads the whole document at construction,
+                    // so the temp file can be removed immediately afterwards.
+                    CascadeClassifier classifier = new CascadeClassifier(tmp.toString());
+                    if (!classifier.empty()) {
+                        log.debug("Loaded cascade '{}' from classpath", resourceName);
+                        return classifier;
+                    }
+                } finally {
+                    // Best-effort: on Windows a file still held open cannot be
+                    // removed, which must not turn a successful load into a failure.
+                    try {
+                        Files.deleteIfExists(tmp);
+                    } catch (Exception ignored) {
+                        tmp.toFile().deleteOnExit();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to load cascade '{}' from the classpath", resourceName, e);
+        }
+
+        // 2) filesystem — absolute path, or relative to the current working directory
+        try {
+            CascadeClassifier classifier = new CascadeClassifier(resourceName);
+            if (!classifier.empty()) {
+                log.debug("Loaded cascade '{}' from the filesystem", resourceName);
+                return classifier;
+            }
+        } catch (Exception e) {
+            log.warn("Failed to load cascade '{}' from the filesystem", resourceName, e);
+        }
+
+        log.warn("Haar cascade '{}' was not found on the classpath or filesystem. Face "
+                + "detection is DISABLED, so no frame can pass passive liveness. Add the "
+                + "file to src/main/resources/ (OpenCV data directory) to enable it.",
+                resourceName);
+        return new CascadeClassifier(); // empty; .empty() returns true
+    }
+
+    /**
+     * True when both Haar cascades loaded and face/eye detection is usable.
+     * Package-private so tests can assert the cascade data is present.
+     */
+    boolean cascadesAvailable() {
+        CascadeClassifier face = getFaceCascade();
+        CascadeClassifier eye = getEyeCascade();
+        return face != null && !face.empty() && eye != null && !eye.empty();
     }
 
     public static class InvalidFrameError extends RuntimeException {
@@ -62,6 +140,13 @@ public class ImageUtils {
     }
 
     public Mat decodeBase64Frame(String frameBase64) {
+        // Timed as a whole, including the rejection guards: an oversized or
+        // undecodable frame is a cost this path still pays, and hiding it would
+        // make decode look free under attack.
+        return PipelineTimers.timed(PipelineTimers.DECODE, () -> decodeFrame(frameBase64));
+    }
+
+    private Mat decodeFrame(String frameBase64) {
         try {
             if (frameBase64.length() > 64 && frameBase64.contains(",")) {
                 frameBase64 = frameBase64.substring(frameBase64.indexOf(',') + 1);
@@ -70,12 +155,22 @@ public class ImageUtils {
             if (raw.length == 0) {
                 throw new InvalidFrameError("Empty frame payload");
             }
+            if (raw.length > MAX_FRAME_BYTES) {
+                throw new InvalidFrameError("Frame payload exceeds " + MAX_FRAME_BYTES + " bytes");
+            }
             MatOfByte matOfByte = new MatOfByte(raw);
             Mat image = Imgcodecs.imdecode(matOfByte, Imgcodecs.IMREAD_COLOR);
+            matOfByte.release();
             if (image.empty()) {
+                image.release();
                 throw new InvalidFrameError("Frame could not be decoded as an image");
             }
-            return image;
+            if (image.cols() > MAX_FRAME_DIMENSION || image.rows() > MAX_FRAME_DIMENSION
+                    || (long) image.cols() * image.rows() > MAX_FRAME_PIXELS) {
+                image.release();
+                throw new InvalidFrameError("Frame dimensions exceed supported limits");
+            }
+            return downscaleForAnalysis(image);
         } catch (InvalidFrameError e) {
             throw e;
         } catch (Exception e) {
@@ -83,7 +178,34 @@ public class ImageUtils {
         }
     }
 
+    /**
+     * Bound the CPU cost of face detection / quality scoring: Haar cascade and
+     * Laplacian work scale with pixel count, so a 4K frame would cost ~9x a
+     * 720p one. Frames above {@link #ANALYSIS_MAX_DIMENSION} are scaled down
+     * (INTER_AREA, quality-preserving) so every input resolution analyses at
+     * the same cost. Small frames (the console's 640x480) pass through
+     * untouched.
+     */
+    private Mat downscaleForAnalysis(Mat image) {
+        int maxSide = Math.max(image.cols(), image.rows());
+        if (maxSide <= ANALYSIS_MAX_DIMENSION) {
+            return image;
+        }
+        double scale = (double) ANALYSIS_MAX_DIMENSION / maxSide;
+        Size target = new Size(
+                Math.max(1, Math.round(image.cols() * scale)),
+                Math.max(1, Math.round(image.rows() * scale)));
+        Mat small = new Mat();
+        Imgproc.resize(image, small, target, 0, 0, Imgproc.INTER_AREA);
+        image.release();
+        return small;
+    }
+
     public Rect[] detectFaces(Mat image) {
+        return PipelineTimers.timed(PipelineTimers.FACE_DETECT, () -> detectFacesInternal(image));
+    }
+
+    private Rect[] detectFacesInternal(Mat image) {
         CascadeClassifier cascade = getFaceCascade();
         if (cascade == null || cascade.empty()) {
             return new Rect[0];

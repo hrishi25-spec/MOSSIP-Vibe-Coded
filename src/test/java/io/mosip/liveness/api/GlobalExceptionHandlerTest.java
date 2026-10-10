@@ -65,4 +65,12 @@ class GlobalExceptionHandlerTest {
                         .contentType(MediaType.APPLICATION_JSON).content(badJson))
                 .andExpect(status().isBadRequest());
     }
+
+    @Test
+    void invalidPathUuid_returns400Not500() throws Exception {
+        mockMvc.perform(get("/api/v1/sessions/not-a-uuid"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.status").value(400));
+    }
 }

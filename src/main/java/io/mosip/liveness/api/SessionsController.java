@@ -1,5 +1,7 @@
 package io.mosip.liveness.api;
 
+import io.mosip.liveness.config.EffectivePolicy;
+import io.mosip.liveness.config.EffectivePolicyValidator;
 import io.mosip.liveness.dto.SessionCreateRequest;
 import io.mosip.liveness.dto.SessionResponse;
 import io.mosip.liveness.dto.SessionSummary;
@@ -8,6 +10,7 @@ import io.mosip.liveness.models.enums.SessionStatus;
 import io.mosip.liveness.crud.ChallengeRepository;
 import io.mosip.liveness.crud.FrameEventRepository;
 import io.mosip.liveness.crud.LivenessSessionRepository;
+import io.mosip.liveness.services.ConfigService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -29,9 +32,19 @@ public class SessionsController {
     private final LivenessSessionRepository sessionRepo;
     private final FrameEventRepository frameEventRepo;
     private final ChallengeRepository challengeRepo;
+    private final ConfigService configService;
+    private final EffectivePolicyValidator effectivePolicyValidator;
 
     @PostMapping
     public ResponseEntity<SessionResponse> createSession(@Valid @RequestBody SessionCreateRequest req) {
+        // Resolve the user type's policy once, validate it, and freeze it on the
+        // session. Doing this here (rather than per frame) means the operating
+        // point is chosen at the start and cannot drift mid-session, and an
+        // invalid configuration fails creation rather than being frozen silently.
+        EffectivePolicy policy = configService.getEffectivePolicy(
+                configService.toCoreWorkflow(req.getWorkflowType()));
+        effectivePolicyValidator.validate(policy);
+
         LivenessSession session = LivenessSession.builder()
                 .workflowType(req.getWorkflowType())
                 .deviceId(req.getDeviceId())
@@ -39,6 +52,8 @@ public class SessionsController {
                 .online(req.getOnline() != null ? req.getOnline() : true)
                 .status(SessionStatus.ACTIVE)
                 .retryCount(0)
+                .policySnapshot(policy)
+                .policySnapshotAt(OffsetDateTime.now())
                 .build();
         sessionRepo.save(session);
 
@@ -85,6 +100,7 @@ public class SessionsController {
         return SessionResponse.builder()
                 .id(s.getId())
                 .workflowType(s.getWorkflowType())
+                .policy(s.getPolicySnapshot())
                 .deviceId(s.getDeviceId())
                 .status(s.getStatus())
                 .currentStage(s.getCurrentStage())

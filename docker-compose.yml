@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -7,10 +5,12 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-mosip}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:-pad_liveness}
     ports:
-      - "5432:5432"
+      # Bound to loopback so the database is reachable from the host for local
+      # development only, not from the network.
+      - "127.0.0.1:5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
@@ -31,7 +31,18 @@ services:
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB:-pad_liveness}
       POSTGRES_USER: ${POSTGRES_USER:-mosip}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Admin key required by PUT /api/v1/config/* — set it in .env.
+      MOSIP_ADMIN_API_KEY: ${MOSIP_ADMIN_API_KEY:-}
+      # HMAC key for the config audit chain; optional, but recommended.
+      MOSIP_AUDIT_HMAC_SECRET: ${MOSIP_AUDIT_HMAC_SECRET:-}
+      # Keep the old key available while immutable history still needs it.
+      MOSIP_AUDIT_HMAC_PREVIOUS_SECRET: ${MOSIP_AUDIT_HMAC_PREVIOUS_SECRET:-}
+      # Challenge-window floor in ms (default 15000, hard minimum 1000).
+      MIN_CHALLENGE_WINDOW_MS: ${MIN_CHALLENGE_WINDOW_MS:-15000}
+      # Peers whose forwarded client IP may be believed for rate limiting, e.g.
+      # the reverse proxy or this compose network's gateway. Empty = trust nobody.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
     ports:
       - "8000:8000"
     command: java -jar /app/app.jar --spring.profiles.active=default

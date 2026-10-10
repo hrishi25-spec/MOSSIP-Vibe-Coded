@@ -27,6 +27,18 @@ public record EffectivePolicy(
         double combinedActiveWeight
 ) {
     /**
+     * Normalizes the {@code passiveThresholdActive} sentinel: any negative value
+     * means "fall back to {@code passiveThreshold}". Applied here so the rule
+     * holds no matter how the policy was constructed (engine builder or
+     * DB-backed {@link io.mosip.liveness.services.ConfigService}).
+     */
+    public EffectivePolicy {
+        if (passiveThresholdActive < 0) {
+            passiveThresholdActive = passiveThreshold;
+        }
+    }
+
+    /**
      * Secondary passive threshold for active challenge window.
      * Configured separately; defaults to passiveThreshold.
      */

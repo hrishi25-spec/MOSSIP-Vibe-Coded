@@ -6,14 +6,15 @@ Built via `LivenessConfig.builder()`:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `livenessEnabled` | boolean | `true` | Enable/disable liveness verification entirely. When disabled, sessions bypass scoring and return PASSED immediately. |
+| `livenessEnabled` | boolean | `true` | Enable/disable liveness verification. When disabled, passive scoring and active challenges are skipped, but the face-detection gate and **PAD stay fail-closed** — a confirmed presentation attack still rejects. Every bypassing session is audited as `LIVENESS_DISABLED`. |
 | `activeLivenessEnabled` | boolean | `true` | Enable/disable active (Stage 2) liveness. When disabled and passive fails, session hard-fails instead of escalating. |
 | `passiveThreshold` | double | `0.80` | Liveness confidence threshold in [0, 1]. Median score ≥ threshold → proceed; < threshold → escalate (or fail). |
 | `minFaceQuality` | double | `0.50` | Minimum face quality score in [0, 1]. Frames below this are rejected as RETRYABLE_ERROR. |
 | `passiveMinFrames` | int | `5` | Minimum consecutive frames before a passive liveness decision is made. |
 | `passiveWindowFrames` | int | `7` | Sliding window size for temporal median voting. Must be ≥ `passiveMinFrames`. |
 | `minChallengeCount` | int | `2` | Minimum number of distinct challenges that must pass before active liveness is satisfied. |
-| `challengeTimeoutMs` | long | `10,000` | Maximum time (ms) allowed to complete a single challenge. Exceeding this consumes one retry. |
+| `challengeTimeoutMs` | long | `15,000` | How long (ms) a challenge stays open for the user to perform the action. Lowered from 60,000 to 15,000 at the product's request; the floor below is applied at runtime. Exceeding the window consumes one retry. |
+| `min-challenge-window-ms` (`mosip.liveness`) | long | `15,000` (hard min `1,000`) | Floor a stored `challengeTimeoutMs` is raised to, so a shortened or legacy policy row cannot turn a person who needed a moment into a certain failure. Raising it only makes the flow more patient; production lowers it only in tests (the e2e timeout path runs 3s windows instead of 2 × 15s). |
 | `maxRetries` | int | `2` | Number of retries (on top of the initial attempt) before hard failure. Total attempts = 1 + maxRetries. |
 | `supportedChallengeTypes` | Set\<ChallengeType\> | All 5 types | Pool of challenge types the engine may select from. |
 | `onRepeatedFailure` | RepeatedFailureAction | `LOCK_OUT` | Behavior when retry budget is exhausted: LOCK_OUT, FALLBACK, or ESCALATE_TO_OPERATOR. |
@@ -21,14 +22,336 @@ Built via `LivenessConfig.builder()`:
 
 ### Validation Rules
 
-- `passiveThreshold` ∈ [0, 1]
+Validated by `EffectivePolicyValidator` at **session creation** (the frozen
+snapshot must be valid before it is persisted) and on every
+`PUT /api/v1/config/{workflowType}`. A violation is a 400.
+
+- `passiveThreshold` ∈ **(0, 1]** — a threshold of exactly 0 would pass every frame
 - `minFaceQuality` ∈ [0, 1]
 - `passiveMinFrames` ≥ 1
 - `passiveWindowFrames` ≥ `passiveMinFrames`
-- `minChallengeCount` ≥ 1
+- `minChallengeCount` ≥ 1 (and **≤ the number of configured challenge types** when active liveness is on)
 - `maxRetries` ≥ 0
-- `challengeTimeoutMs` > 0
+- `challengeTimeoutMs` ≥ `mosip.liveness.min-challenge-window-ms`
+  (**15,000** by default, never below the engine's 1,000 clamp) — a shorter
+  window is refused by the API and again when a session freezes its snapshot
+- `mosip.liveness.min-challenge-window-ms` ≥ `1,000` (values below are clamped up)
+
+---
+
+## Auditing policy edits
+
+Every `PUT /api/v1/config/{workflowType}` writes one `CONFIG_CHANGED` entry to
+`audit_logs` **in the same transaction as the update**, so a saved policy can
+never be silent and a rolled-back update can never leave a phantom entry. A
+rejected request (no/invalid admin key, invalid value) writes nothing at all.
+
+```
+GET /api/v1/config/audit?limit=50     # newest first, 1–500
+GET /api/v1/config/audit?limit=50&workflowType=OPERATOR   # filtered in SQL, not in the client
+GET /api/v1/config/audit/verify          # walks the whole tamper-evident chain
+```
+
+`workflowType` is optional; omitting it returns every workflow. The filter is  pushed into the query (`audit_logs.workflow_type`, indexed by V8) because the
+audit table grows a row per frame decision — filtering after the fact would page
+through the whole pipeline history to answer a policy question. An unknown value
+is a 400, not a silently unfiltered feed.
+
+Every `CONFIG_CHANGED` row is chained (`prev_hash` → `entry_hash`), and
+PostgreSQL rejects `UPDATE` and `DELETE` on `audit_logs`. `/audit/verify`
+reports the first break and whether it was an edited row or a deleted one.
+
+### Keying the chain (`MOSIP_AUDIT_HMAC_SECRET`)
+
+The chain's hash is `H(prev_hash ‖ canonical(entry))` over a canonical form
+that is stable across a database round-trip. Unkeyed, that detects edits and
+deletions by anyone who does not recompute the chain — but an attacker with
+write access to the database can read the stored hashes and rebuild it, which
+verifies perfectly on its own.
+
+Set `MOSIP_AUDIT_HMAC_SECRET` (property `mosip.security.audit-hmac-secret`,
+minimum 16 characters — shorter values are **rejected at startup**, because a
+guessable key produces keyed-looking hashes an attacker recomputes just as
+easily) to key the hash with **HMAC-SHA-256** instead. The secret lives in the
+app server's environment, not in the database, so a database-write attacker
+cannot recompute a single link:
+
+```bash
+export MOSIP_AUDIT_HMAC_SECRET=$(openssl rand -hex 32)
+curl -s localhost:8000/api/v1/config/audit/verify
+# {"eventType":"CONFIG_CHANGED","chainedEntries":5,"headHash":"…","hmac":true,
+#  "rotationWindowOpen":false,"retiredKeyHashes":false,"intact":true}
+```
+
+| `hmac` | meaning |
+| ------ | ------- |
+| `true` | Entries are HMAC-keyed. A database writer who edits rows cannot rebuild the chain; verification reports the first entry whose stored hash the secret does not produce. |
+| `false` | **Documented fallback**: no secret configured, so the hash is plain SHA-256. Tamper-*detecting* only — a database writer can rebuild the trail. The mode is reported so this state is never mistaken for the keyed one. |
+
+If a **keyed** chain needs to move to a new secret, set
+`MOSIP_AUDIT_HMAC_SECRET` to the new value and
+`MOSIP_AUDIT_HMAC_PREVIOUS_SECRET` to the old value. Writes use the new key;
+verification accepts either. `/api/v1/config/audit/verify` reports
+`rotationWindowOpen` while the previous key is configured and
+`retiredKeyHashes` when any historical entries still need it. The console
+shows both states in the chain badge and details.
+
+The rows are immutable, so this repository does not re-key old entries. If
+`retiredKeyHashes` is true, keep the previous secret available or the chain
+will fail at its first old-key entry. Clearing the previous secret is safe only
+when `retiredKeyHashes` is false. A future key retirement process needs a
+separately trusted archive or re-key protocol; this overlap does not retire a
+key that must still verify historical data.
+
+The previous secret remains accepted by verification while configured, so
+treat it as a live verification key. Anyone who obtains it can calculate
+old-key HMACs outside the application. Do not use the overlap as a substitute
+for protecting the secret.
+
+Moving from the unkeyed SHA-256 fallback to HMAC is separate: the previous-key
+setting cannot make old SHA-256 rows verify under HMAC. Those rows will report
+as broken unless they are migrated through a trusted process. Keep the active
+secret stable across restarts, and never fall back to unkeyed verification for
+a chain that was written with HMAC.
+
+The hash is computed **before** the INSERT: `id` is assigned by the database at
+persist time and `createdAt` by `@PrePersist`, and the immutability triggers
+reject the UPDATE that would write a corrected hash afterwards. `id` is
+therefore deliberately excluded from the canonical form — position in the chain
+plus `prev_hash` already binds an entry uniquely.
+
+```json
+{
+  "eventType": "CONFIG_CHANGED",
+  "createdAt": "2026-10-04T12:34:56.789Z",
+  "details": {
+    "workflowType": "OPERATOR",
+    "action": "UPDATED",
+    "actor": "key:9f2c1a7b4e0d",
+    "changes": {
+      "passiveThreshold": { "from": 0.80, "to": 0.93 },
+      "maxRetryCount": { "from": 3, "to": 4 }
+    },
+    "risk": { "level": "LOW", "reasons": [] }
+  }
+}
+```
+
+- **Only fields that actually moved** are listed. A `PUT` that resubmits the
+  current values is still recorded (someone touched the config) but with an empty
+  `changes` object — a real move and a no-op must not read alike.
+- **`action`** is `CREATED` when the `PUT` was the one that first created the
+  `config_policies` row, otherwise `UPDATED`.
+- **`actor`** is a truncated SHA-256 fingerprint of the presented admin key.
+  The key itself is never stored, logged or echoed; the fingerprint only
+  correlates edits made with the same key.
+- **`risk`** classifies how much the edit weakens the checks: `HIGH` when it
+  lowers `passiveThreshold` or switches `livenessEnabled` or
+  `activeLivenessEnabled` off — the moves that silently defeat liveness — and
+  `LOW` otherwise. `reasons` names which weakening move fired, so the console
+  flags the edit without the reader diffing two numbers. The classification is
+  computed over the diff and sealed inside the hashed `details`, so it cannot
+  be softened after the fact without breaking the chain. Entries written
+  before the classification existed simply have no `risk` key.
+- Config events have **no session**, so they never appear in a session's
+  `audit` trail, and that trail can never pick one up (`session_id IS NULL`).
+- The feed is an open read, like `GET /api/v1/config/{workflowType}` (which
+  already publishes the current policy). Only writes require the admin key.
+
+ponytail: the feed is a bounded, newest-first read of one table with no
+per-workflow server-side filter — the workflow type lives inside the JSON
+`details` column, which is deliberately unqueryable (text, identical on H2 and  PostgreSQL). Filter client-side, as `static/console.js` does.
+
 - `supportedChallengeTypes` must not be empty (and if `activeLivenessEnabled`, must have ≥ 1 type)
+
+---
+
+## Choosing `passiveThreshold` — calibrate, don't guess
+
+A threshold number only means something relative to the **score distribution of
+the scorer that produced the scores**. Two things changed to make the number
+derivable instead of asserted:
+
+1. **The score is a liveness confidence.** With `mosip.liveness.backend: auto`
+   the passive score is MiniFASNet-V2's live-class probability (model
+   confidence), not the old image-quality heuristic. That probability is
+   badly calibrated — it pins at ~1.0 on a genuine face — so
+   `mosip.liveness.score-temperature` (default `4.0`) compresses the log-odds
+   above `0.80` into a readable band, anchored so `0.80` maps to itself and the
+   default operating point does not move (see `ProbabilityCalibration`). Set it
+   to `1` to score with the raw model confidence. A threshold chosen against
+   one scorer (or one temperature) does not transfer to another — re-run the
+   sweep after either change.
+2. **The decision is a median over 5 scored frames**, not a single frame, so
+   calibration must evaluate the same windowed decision (it does).
+
+### The sweep endpoint
+
+```
+GET /api/v1/eval/threshold-sweep?targetBpcer=0.02
+```
+
+Returns one row per threshold (0.05 … 0.95, step 0.05):
+
+| Field | Meaning |
+|-------|---------|
+| `bpcer` | fraction of bona-fide windows that would **escalate to an active challenge** at this threshold (user-experience cost) |
+| `apcer` | fraction of attack windows that would **pass passive** at this threshold (security cost); `null` when unmeasured |
+| `acer` | mean of the two; `null` when APCER is unmeasured |
+| `recommendedThreshold` | the operating point (see rule below) |
+| `recommendationBasis` / `note` | why, and what data was (not) available |
+
+**Inputs:** bona-fide windows are the first `passiveMinFrames` scores of every
+session that passed, taken from `frame_events` (real captures). Attack windows
+are recorded presentation-attack sessions when any exist; otherwise a clearly
+labelled **proxy corpus** (simulated print/screen degradations,
+`attackDataIsProxy: true`). With neither, `apcer` is `null` and the note says
+`APCER unmeasured` — never a fabricated zero.
+
+**Recommendation rule:** the *highest* threshold that keeps
+`BPCER ≤ targetBpcer` with `APCER = 0` (stricter is safer, so within the UX
+budget we take the strictest point); failing that, minimum `ACER`; failing
+that, no recommendation.
+
+### Applying the result
+
+```bash
+# read the table
+curl 'http://localhost:8000/api/v1/eval/threshold-sweep?targetBpcer=0.02'
+
+# apply the recommended value per workflow (DB row wins at runtime)
+# PUT requires the admin API key (fail-closed: set MOSIP_ADMIN_API_KEY first)
+curl -X PUT http://localhost:8000/api/v1/config/RESIDENT \
+     -H 'Content-Type: application/json' \
+     -H "X-Admin-API-Key: $MOSIP_ADMIN_API_KEY" \
+     -d '{"passiveThreshold": 0.90}'
+```
+
+Defaults are unified on `0.80` across `LivenessConfig`, `application.yml`, the
+`config_policies` seed and the DB-miss fallback (V2 migration) — previously the
+seed said 0.75 while everything else said 0.80. `targetBpcer` is the knob for
+how much UX you spend: 0.02 means at most ~2% of genuine users are pushed into
+an active challenge.
+
+---
+
+## Service knobs (`application.yml`, `mosip.liveness.*`)
+
+## Required environment variables
+
+The application reads several environment variables for configuration. Secret values must be provided via secure mechanisms (e.g., Docker secrets, Kubernetes secrets, CI/CD masked variables) and **never** hard-coded in image or version control.
+
+| Variable | Required? | Secret? | Description |
+|----------|-----------|---------|-------------|
+| `POSTGRES_USER` | no (defaults to `mosip`) | no | PostgreSQL username |
+| `POSTGRES_PASSWORD` | **yes** | **yes** | PostgreSQL password |
+| `POSTGRES_DB` | no (defaults to `pad_liveness`) | no | PostgreSQL database name |
+| `POSTGRES_HOST` | no (defaults to `localhost`) | no | PostgreSQL host |
+| `POSTGRES_PORT` | no (defaults to `5432`) | no | PostgreSQL port |
+| `MOSIP_ADMIN_API_KEY` | **yes** (for config updates via `PUT /api/v1/config/*`) | **yes** | Admin API key; generate with `openssl rand -hex 32` |
+| `MOSIP_AUDIT_HMAC_SECRET` | **yes** (recommended for tamper‑evident audit chain) | **yes** | Secret for HMAC‑SHA‑256 audit chain; minimum 16 characters |
+| `MOSIP_AUDIT_HMAC_PREVIOUS_SECRET` | no | **yes** | Previous audit HMAC secret for key rotation; must differ from current |
+| `SERVER_PORT` | no (defaults to `8000`) | no | HTTP server port |
+| `TOMCAT_THREADS_MAX` | no (defaults to `50`) | no | Maximum Tomcat threads |
+| `DB_POOL_SIZE` | no (defaults to `5`) | no | HikariCP maximum pool size |
+| `MAX_REQUEST_BODY_BYTES` | no (defaults to `25165824` = 24 MB) | no | Maximum HTTP request body size |
+| `RATE_LIMIT_ENABLED` | no (defaults to `true`) | no | Enable rate‑limiting filter |
+| `SESSION_CREATE_LIMIT` | no (defaults to `30`) | no | Session creations per IP per minute |
+| `FRAME_LIMIT` | no (defaults to `60`) | no | Frames + challenge validations per session per 10 s |
+| `TRUSTED_PROXIES` | no (defaults to empty) | no | Comma‑separated list of trusted proxies for rate‑limiting |
+| `MIN_CHALLENGE_WINDOW_MS` | no (defaults to `15000`) | no | Floor for per‑workflow challenge timeout (hard minimum 1000 ms) |
+| `LIVENESS_DIAGNOSTICS_ENABLED` | no (defaults to `false`) | no | Enable diagnostic mode (loopback only) |
+
+See `.env.example` in the repository root for a template.
+
+## Audit logging security
+
+The audit logging framework automatically replaces the values of any field keys that contain (case-insensitive) the substrings specified by the environment variable `AUDIT_REDACTION_KEYS` (a comma-separated list) with their SHA-256 hash. By default, the patterns are `"secret"`, `"key"`, `"token"`, `"password"`, and `"auth"`. For example, a call like `.field("apiToken", "abc123")` will store the value as a 64-character hexadecimal SHA-256 hash in the audit log, allowing later verification without storing the plaintext value.
+
+Operators can extend the list of sensitive key patterns without code changes by setting the `AUDIT_REDACTION_KEYS` environment variable, e.g.:
+```
+export AUDIT_REDACTION_KEYS="secret,key,token,password,auth,private,credential"
+```
+
+Developers should still audit their usage of `AuditEvent.field()` to ensure no sensitive data is inadvertently added as a field value, but the automatic hashing provides an additional safety net while still allowing audit trail verification.
+
+### Providing secrets securely
+
+#### Docker Compose (development)
+
+```yaml
+services:
+  api:
+    # ...
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+      MOSIP_ADMIN_API_KEY_FILE: /run/secrets/admin-api-key
+      MOSIP_AUDIT_HMAC_SECRET_FILE: /run/secrets/audit-hmac-secret
+    secrets:
+      - postgres-password
+      - admin-api-key
+      - audit-hmac-secret
+
+secrets:
+  postgres-password:
+    file: ./secrets/postgres-password.txt
+  admin-api-key:
+    file: ./secrets/admin-api-key.txt
+  audit-hmac-secret:
+    file: ./secrets/audit-hmac-secret.txt
+```
+
+#### Kubernetes (production)
+
+Create secrets:
+
+```bash
+kubectl create secret generic db-credentials \
+  --from-literal=POSTGRES_PASSWORD=<password> \
+  --from-literal=POSTGRES_USER=mosip \
+  --from-literal=POSTGRES_DB=pad_liveness \
+  --from-literal=POSTGRES_HOST=postgres \
+  --from-literal=POSTGRES_PORT=5432
+
+kubectl create secret generic mosip-secrets \
+  --from-literal=MOSIP_ADMIN_API_KEY=<admin-key> \
+  --from-literal=MOSIP_AUDIT_HMAC_SECRET=<audit-secret> \
+  --from-literal=MOSIP_AUDIT_HMAC_PREVIOUS_SECRET=<previous-audit-secret>
+```
+
+Reference them in the pod spec:
+
+```yaml
+env:
+  - name: POSTGRES_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: db-credentials
+        key: POSTGRES_PASSWORD
+  - name: MOSIP_ADMIN_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: mosip-secrets
+        key: MOSIP_ADMIN_API_KEY
+  - name: MOSIP_AUDIT_HMAC_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: mosip-secrets
+        key: MOSIP_AUDIT_HMAC_SECRET
+```
+
+> 💡 **Tip**: For added security, consider using a secrets management solution like HashiCorp Vault, AWS Secrets Manager, or Azure Key Vault and inject values at runtime via init containers or sidecars.
+
+---
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `backend` | `auto` | Single selection for **both** wirings — the HTTP scorer (`PassiveScoringService`) and the `LivenessBackend` SPI bean (interop report F5): `auto` = bundled MiniFASNet ONNX when it loads, heuristic fallback otherwise (SPI bean: the scripted mock); `heuristic` = force the OpenCV quality heuristic (SPI bean: the mock); `mock` / `onnx-minifasnet-v2` / `mediapipe-facemesh` / `tflite-minifasnet` = that backend by its audit id on **both** paths. Explicit ids never fall back to another scorer — unavailable means a coded, fail-closed error (the engine maps it to its device error). Unknown values fail at startup. |
+| `model-path` | *(blank)* | Filesystem override for the model; blank uses the bundled `classpath:models/minifasnet_v2.onnx` (SHA-256 `d7b3cd9b…` verified on load). |
+| `score-temperature` | `4.0` | Log-odds temperature that de-saturates the model's live-class probability **above** `0.80` (`ProbabilityCalibration`). The raw MiniFASNet score sits at 0.99–0.9999 on an ordinary genuine face, so the console showed a flat `1.000` with no information. The map is anchored at the default threshold (0.80 → 0.80), so the pass/fail verdict at `t ≤ 0.80` is unchanged; `1` reports the raw model confidence and `>1` spreads more. Per-workflow thresholds above 0.80 are applied to the calibrated scale and therefore demand a slightly higher raw confidence. |
+| `passive-threshold` | `0.80` | Mirrors `LivenessConfig.DEFAULT_PASSIVE_THRESHOLD`; the `config_policies` DB row wins at runtime. Also the anchor of `score-temperature`'s compression, so that default is preserved exactly. |
+| `min-face-quality`, `passive-min-frames`, `passive-window-frames`, `min-challenge-count`, `challenge-timeout-ms`, `max-retries` | see yml | Engine defaults for the embedded (library) path. |
+| `diagnostics-enabled` (`LIVENESS_DIAGNOSTICS_ENABLED`) | `false` | **Diagnostic mode (opt-in, local)** — orchestration spec §10. When true, the service retains raw per-frame scores, timings, FPS and the scorer delegate in a bounded ring (**no pixels**) and `GET /api/v1/diagnostics` serves the snapshot to **loopback callers only**; disabled or remote callers get the identical empty 404, so the mode never leaks its own existence. The console's debug panel appears only when both gates pass. |
 
 ---
 
@@ -56,11 +379,58 @@ Any field not overridden inherits the base value. The merge happens in `Liveness
 
 ## Repeated Failure Actions
 
-| Action | Behavior |
-|--------|----------|
-| `LOCK_OUT` | Hard-fail the session; operator/device locked out of further attempts. Default. |
-| `FALLBACK` | Hard-fail and flag for fallback capture flow (e.g., manual verification). |
-| `ESCALATE_TO_OPERATOR` | Hard-fail and flag for supervisor/operator escalation. |
+What the session does once the active-challenge retry budget (`maxRetryCount`)
+is exhausted. **All three are terminal and none grants another challenge** — extra
+attempts belong in `maxRetryCount`, not in the failure action. They differ only in
+the outcome signal and whether the client may open a fresh session. Wired into the
+HTTP decision path (`DecisionEngineService.processChallengeValidation`), so a
+per-workflow value is real behaviour, not just stored config.
+
+| Action | Session | `action` returned | `failureReason` | `mayRetrySession` |
+|--------|---------|-------------------|-----------------|-------------------|
+| `LOCK_OUT` | FAILED | `locked` | `max_retries_exceeded:locked_out` | `false` |
+| `ESCALATE_TO_OPERATOR` | FAILED | `escalate_to_operator` | `max_retries_exceeded:escalation_required` | `false` |
+| `FALLBACK` (seeded as `ALLOW_RETRY`) | FAILED | `failed` | `max_retries_exceeded` | `true` |
+
+`escalate_to_operator` is a signal only (there is no escalation endpoint of its
+own); the client routes the subject to an operator.
+
+---
+
+## Per-user-type policy at session start
+
+The user type (`RESIDENT` / `OPERATOR` / `SUPERVISOR`) is chosen **once**, when the
+session is created. The server resolves that workflow's effective policy, validates
+it, and **freezes it on the session** (`policy_snapshot`). The decision engine then
+uses the frozen snapshot for the whole session, so an admin edit to
+`config_policies` cannot change an in-flight session's operating point. Legacy rows
+with no snapshot fall back to a live read.
+
+The three workflows seed **distinct** operating points (single source of truth:
+`WorkflowPolicyDefaults`, mirrored by the `V4__session_policy_snapshot.sql` seed and
+the `ConfigController` lazy-create path):
+
+| Workflow | `passiveThreshold` | `minChallengeCount` | `challengeTimeoutMs` | `maxRetryCount` | `onRepeatedFailure` | challenges |
+|----------|--------------------|---------------------|----------------------|-----------------|---------------------|------------|
+| `RESIDENT` | 0.80 | 1 | 20000 | 3 | `ESCALATE_TO_OPERATOR` | blink, smile |
+| `OPERATOR` | 0.82 | 1 | 15000 | 2 | `ALLOW_RETRY` | blink, turn_left, turn_right |
+| `SUPERVISOR` | 0.85 | 2 | 15000 | 1 | `LOCK_OUT` | blink, smile, turn_left, turn_right |
+
+A resident may be physically assisted by an officer, so a failed resident check
+escalates to an operator; operator/supervisor authentication must never escalate to
+an operator, so those workflows fail/retry instead. All values are defaults —
+override any field at runtime with `PUT /api/v1/config/{workflowType}`.
+
+```bash
+# The session-create response carries the resolved, frozen policy:
+curl -s -X POST localhost:8000/api/v1/sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"workflowType":"SUPERVISOR","deviceId":"L1-CAM-01"}' | python3 -m json.tool
+```
+
+> Live preview vs frozen snapshot: `GET /api/v1/config/{workflowType}/effective`
+> shows what a **new** session would get; a session's own `policy` field shows what
+> that **in-flight** session is actually using.
 
 ---
 
@@ -75,7 +445,9 @@ Any field not overridden inherits the base value. The merge happens in `Liveness
 | PAD failure | "Face verification could not be completed. Please try again." | **No** (terminal, distinct audit) |
 | Challenge failure | "Verification action was not completed. Please try again." | Yes (retry) |
 | Challenge timeout | "Verification timed out. Please try again." | Yes (retry) |
-| Max retries exceeded | "Verification could not be completed. Please contact support." | No |
+| Max retries exceeded (`LOCK_OUT`) | "Face verification failed. Please contact an operator for assistance." | No |
+| Max retries exceeded (`ESCALATE_TO_OPERATOR`) | "Face verification could not be completed. An operator will assist you." | No (operator assist) |
+| Max retries exceeded (`FALLBACK`/`ALLOW_RETRY`) | "We could not verify face liveness. Please try again." | Yes — a **new** session (`mayRetrySession: true`) |
 | Device unavailable | "Biometric device is unavailable." | No |
 
 ---
